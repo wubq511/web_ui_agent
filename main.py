@@ -57,6 +57,14 @@ def main():
         start_url = "https://www.baidu.com"
         
         agent.run(objective, start_url)
+        """
+        浏览器页面开关器使用方法
+        # 默认行为：任务完成后保持浏览器打开
+        agent.run("在百度搜索 LangGraph 教程", "https://www.baidu.com")
+
+        # 自动关闭浏览器（原有行为）
+        agent.run("在百度搜索 LangGraph 教程", "https://www.baidu.com", keep_browser_open=False)
+        """
         
         print("\n" + "╔"+"═"*58+"╗")
         print("║" + " "*18 + "程序执行完毕" + " "*24 + "║")

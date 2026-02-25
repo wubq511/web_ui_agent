@@ -144,10 +144,10 @@ class WebUIAgent:
     
     def _close_browser(self):
         """
-        关闭浏览器
+        手动关闭浏览器
         
         【设计思路】
-        在任务完成后，需要正确关闭浏览器和 Playwright 实例，
+        在用户确认查看完信息后，手动调用此方法关闭浏览器和 Playwright 实例，
         释放资源并避免内存泄漏。
         """
         if self.page:
@@ -157,15 +157,224 @@ class WebUIAgent:
         if self.playwright:
             self.playwright.stop()
         
+        self.page = None
+        self.browser = None
+        self.playwright = None
+        
         print("✅ 浏览器已关闭")
     
-    def run(self, objective: str, start_url: str = None) -> AgentState:
+    def _display_result_in_browser(self, state: AgentState):
+        """
+        在浏览器中展示任务结果摘要
+        
+        【设计思路】
+        任务完成后，在浏览器中打开一个新页面展示执行结果，
+        方便用户查看任务详情和操作记录。
+        """
+        if not self.browser:
+            return
+        
+        result_page = self.browser.new_page()
+        
+        step_count = state['step_count']
+        is_done = state['is_done']
+        error_message = state.get('error_message', '')
+        history = state.get('history', [])
+        objective = state.get('objective', '未知任务')
+        
+        status_icon = "✅" if is_done else "⚠️"
+        status_text = "已完成" if is_done else "未完成"
+        status_color = "#28a745" if is_done else "#ffc107"
+        
+        history_rows = ""
+        for entry in history:
+            step = entry.get('step', '?')
+            action = entry.get('action_type', '?')
+            result = entry.get('result', '?')
+            thought = entry.get('thought', '')
+            history_rows += f"""
+                <tr>
+                    <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{step}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd;"><code>{action}</code></td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{result[:100]}{'...' if len(result) > 100 else ''}</td>
+                </tr>
+            """
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>任务执行结果 - Web UI Agent</title>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    max-width: 900px;
+                    margin: 0 auto;
+                    padding: 20px;
+                    background-color: #f5f5f5;
+                }}
+                .container {{
+                    background-color: white;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    padding: 30px;
+                }}
+                .header {{
+                    text-align: center;
+                    margin-bottom: 30px;
+                    padding-bottom: 20px;
+                    border-bottom: 2px solid #e0e0e0;
+                }}
+                .status-badge {{
+                    display: inline-block;
+                    padding: 8px 20px;
+                    border-radius: 20px;
+                    font-size: 18px;
+                    font-weight: bold;
+                    background-color: {status_color};
+                    color: white;
+                }}
+                .info-card {{
+                    background-color: #f8f9fa;
+                    border-radius: 8px;
+                    padding: 20px;
+                    margin: 15px 0;
+                }}
+                .info-item {{
+                    display: flex;
+                    margin: 10px 0;
+                }}
+                .info-label {{
+                    font-weight: bold;
+                    min-width: 100px;
+                    color: #555;
+                }}
+                .info-value {{
+                    color: #333;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 15px;
+                }}
+                th {{
+                    background-color: #007bff;
+                    color: white;
+                    padding: 12px 8px;
+                    border: 1px solid #ddd;
+                    text-align: left;
+                }}
+                tr:nth-child(even) {{
+                    background-color: #f8f9fa;
+                }}
+                tr:hover {{
+                    background-color: #e9ecef;
+                }}
+                .warning {{
+                    background-color: #fff3cd;
+                    border-left: 4px solid #ffc107;
+                    padding: 15px;
+                    margin: 15px 0;
+                    border-radius: 4px;
+                }}
+                .footer {{
+                    text-align: center;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #e0e0e0;
+                    color: #666;
+                }}
+                .close-hint {{
+                    background-color: #d1ecf1;
+                    border-left: 4px solid #17a2b8;
+                    padding: 15px;
+                    margin: 20px 0;
+                    border-radius: 4px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🎯 Web UI Agent 任务执行结果</h1>
+                    <div class="status-badge">{status_icon} {status_text}</div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>📋 任务信息</h3>
+                    <div class="info-item">
+                        <span class="info-label">目标：</span>
+                        <span class="info-value">{objective}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">总步数：</span>
+                        <span class="info-value">{step_count}</span>
+                    </div>
+                </div>
+                
+                {"<div class='warning'><strong>⚠️ 错误信息：</strong>" + error_message + "</div>" if error_message else ""}
+                
+                <div class="close-hint">
+                    <strong>💡 提示：</strong>任务已完成，您可以查看上方信息。如需关闭浏览器，请返回终端按 <kbd>Enter</kbd> 键或关闭此窗口。
+                </div>
+                
+                <h3>📜 执行历史</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 80px;">步骤</th>
+                            <th style="width: 150px;">操作类型</th>
+                            <th>执行结果</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {history_rows}
+                    </tbody>
+                </table>
+                
+                <div class="footer">
+                    <p>Web UI Agent 自动化任务执行完成</p>
+                    <p>浏览器将保持打开状态，您可以随时查看页面内容</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        result_page.set_content(html_content)
+        print("📊 任务结果已在浏览器中展示")
+    
+    def _wait_for_user_close(self):
+        """
+        等待用户手动确认关闭浏览器
+        
+        【设计思路】
+        任务完成后，保持浏览器打开，等待用户在终端按 Enter 键后关闭。
+        这样用户有足够时间查看浏览器中的信息内容。
+        """
+        print("\n" + "═"*60)
+        print("💡 任务已完成，浏览器保持打开状态")
+        print("   您可以在浏览器中查看任务执行结果")
+        print("   按 Enter 键关闭浏览器并退出程序...")
+        print("═"*60)
+        
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        
+        self._close_browser()
+    
+    def run(self, objective: str, start_url: str = None, keep_browser_open: bool = True) -> AgentState:
         """
         运行 Agent 执行任务
         
         【参数】
         objective: str - 用户目标描述
         start_url: str - 起始页面 URL（可选）
+        keep_browser_open: bool - 任务完成后是否保持浏览器打开（默认 True）
         
         【工作流程】
         1. 初始化浏览器
@@ -173,7 +382,8 @@ class WebUIAgent:
         3. 初始化状态
         4. 执行状态图
         5. 输出结果
-        6. 关闭浏览器
+        6. 在浏览器中展示结果（如果 keep_browser_open 为 True）
+        7. 等待用户确认后关闭浏览器（如果 keep_browser_open 为 True）
         
         【返回值】
         AgentState: 最终状态
@@ -203,14 +413,25 @@ class WebUIAgent:
             
             self._print_summary(final_state)
             
+            if keep_browser_open:
+                self._display_result_in_browser(final_state)
+                self._wait_for_user_close()
+            else:
+                self._close_browser()
+            
             return final_state
             
         except Exception as e:
             print(f"\n❌ 执行过程中发生错误: {e}")
-            raise
-        
-        finally:
+            if keep_browser_open:
+                print("\n💡 浏览器保持打开，您可以查看错误现场")
+                print("   按 Enter 键关闭浏览器...")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
             self._close_browser()
+            raise
     
     def _print_summary(self, state: AgentState):
         """
