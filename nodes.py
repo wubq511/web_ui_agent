@@ -39,8 +39,9 @@ def perception_node(state: AgentState, page: Page) -> dict:
     1. 获取当前页面的 HTML 内容
     2. 使用 BeautifulSoup 解析 HTML
     3. 提取所有可交互元素（<a>, <button>, <input>, <select>, <textarea>）
-    4. 为每个元素分配唯一 ID 并提取关键信息
-    5. 组织成元素字典返回
+    4. 使用 Playwright 验证元素是否真正可见（关键改进！）
+    5. 为每个元素分配唯一 ID 并提取关键信息
+    6. 组织成元素字典返回
     
     【参数】
     state: AgentState - 当前状态
@@ -73,6 +74,7 @@ def perception_node(state: AgentState, page: Page) -> dict:
     
     elements_dict: dict[int, dict] = {}
     element_id = 1
+    seen_selectors = set()
     
     for tag_name in interactive_tags:
         elements = soup.find_all(tag_name)
@@ -85,14 +87,39 @@ def perception_node(state: AgentState, page: Page) -> dict:
             if 'display: none' in style or 'visibility: hidden' in style:
                 continue
             
+            element_id_attr = element.get('id', '')
+            element_name = element.get('name', '')
+            
+            selector = get_element_selector(element)
+            xpath = get_element_xpath(element)
+            
+            if selector in seen_selectors:
+                continue
+            
+            is_visible = False
+            try:
+                locator = page.locator(selector).first
+                is_visible = locator.is_visible(timeout=1000)
+            except Exception:
+                try:
+                    locator = page.locator(f"xpath={xpath}").first
+                    is_visible = locator.is_visible(timeout=1000)
+                except Exception:
+                    is_visible = False
+            
+            if not is_visible:
+                continue
+            
+            seen_selectors.add(selector)
+            
             element_info = {
                 "type": tag_name,
                 "text": element.get_text(strip=True)[:100],
                 "placeholder": element.get('placeholder', ''),
-                "name": element.get('name', ''),
-                "id": element.get('id', ''),
-                "xpath": get_element_xpath(element),
-                "selector": get_element_selector(element),
+                "name": element_name,
+                "id": element_id_attr,
+                "xpath": xpath,
+                "selector": selector,
                 "is_clickable": tag_name in ['a', 'button'] or 
                                (tag_name == 'input' and element.get('type') in ['submit', 'button', 'image']),
                 "is_input": tag_name in ['input', 'textarea'] and 
@@ -103,7 +130,7 @@ def perception_node(state: AgentState, page: Page) -> dict:
                 elements_dict[element_id] = element_info
                 element_id += 1
     
-    print(f"📊 共发现 {len(elements_dict)} 个可交互元素")
+    print(f"📊 共发现 {len(elements_dict)} 个可交互元素（已验证可见性）")
     
     for eid, info in list(elements_dict.items())[:10]:
         text_preview = info['text'][:30] if info['text'] else info.get('placeholder', '')[:30]
@@ -145,23 +172,24 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI) -> dict:
     print("🧠 [决策模块] 正在思考下一步操作...")
     print("="*60)
     
-    system_prompt = """你是一个专业的网页操作助手。你的任务是分析当前网页状态，决定下一步操作来完成用户目标。
+    system_prompt = """你是一个专业的网页操作助手(web-ui-agent)。你的任务是分析当前网页状态，决定下一步操作来完成用户目标。
 
 ## 你的能力
 你可以执行以下操作：
 1. **click**: 点击页面上的元素（按钮、链接等）
 2. **type**: 在输入框中输入文字
-3. **goto**: 导航到指定的 URL
-4. **done**: 表示任务已完成
+3. **press**: 按下键盘按键（如 Enter 回车键提交表单）
+4. **goto**: 导航到指定的 URL
+5. **done**: 表示任务已完成
 
 ## 输出格式要求
 你必须以严格的 JSON 格式输出，不要包含任何其他文字：
 ```json
 {
     "thought": "你的思考过程，分析当前状态和下一步应该做什么",
-    "action_type": "click|type|goto|done",
+    "action_type": "click|type|press|goto|done",
     "target_id": 目标元素的数字ID（用于click和type操作）,
-    "value": "输入的内容或URL（用于type和goto操作）"
+    "value": "输入的内容、按键名称或URL（用于type、press和goto操作）"
 }
 ```
 
@@ -170,7 +198,8 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI) -> dict:
 2. 优先完成核心任务，不要被次要内容干扰
 3. 如果遇到错误，尝试其他方法
 4. 确认任务完成后才输出 done
-5. 每次只执行一个动作"""
+5. 每次只执行一个动作
+6. 在输入框输入内容后，通常需要按 Enter 键提交，使用 press 操作"""
 
     elements_description = "当前页面可交互元素：\n"
     for eid, info in state["elements_dict"].items():
@@ -227,7 +256,7 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI) -> dict:
             if field not in decision:
                 raise ValueError(f"决策缺少必要字段: {field}")
         
-        valid_actions = ["click", "type", "goto", "done"]
+        valid_actions = ["click", "type", "press", "goto", "done"]
         if decision["action_type"] not in valid_actions:
             raise ValueError(f"无效的动作类型: {decision['action_type']}")
         
@@ -351,14 +380,21 @@ def action_node(state: AgentState, page: Page) -> dict:
                 raise ValueError(f"找不到 ID 为 {target_id} 的元素")
             
             selector = element_info["selector"]
+            xpath = element_info["xpath"]
             print(f"👆 点击元素 [{target_id}]: {selector}")
             
-            try:
-                page.click(selector, timeout=ACTION_TIMEOUT)
-            except Exception:
-                xpath = element_info["xpath"]
-                print(f"   尝试使用 XPath: {xpath}")
-                page.click(f"xpath={xpath}", timeout=ACTION_TIMEOUT)
+            clicked = False
+            for loc_strategy in [selector, f"xpath={xpath}"]:
+                try:
+                    page.click(loc_strategy, timeout=ACTION_TIMEOUT, force=True)
+                    clicked = True
+                    break
+                except Exception as e:
+                    print(f"   尝试 {loc_strategy} 失败: {str(e)[:50]}")
+                    continue
+            
+            if not clicked:
+                raise ValueError("所有定位策略都失败")
             
             page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
             print("✅ 点击成功")
@@ -376,17 +412,37 @@ def action_node(state: AgentState, page: Page) -> dict:
                 raise ValueError(f"找不到 ID 为 {target_id} 的元素")
             
             selector = element_info["selector"]
+            xpath = element_info["xpath"]
             print(f"⌨️ 在元素 [{target_id}] 中输入: {value}")
             
-            try:
-                page.fill(selector, value, timeout=ACTION_TIMEOUT)
-            except Exception:
-                xpath = element_info["xpath"]
-                print(f"   尝试使用 XPath: {xpath}")
-                page.fill(f"xpath={xpath}", value, timeout=ACTION_TIMEOUT)
+            typed = False
+            for loc_strategy in [selector, f"xpath={xpath}"]:
+                try:
+                    locator = page.locator(loc_strategy).first
+                    locator.fill(value, timeout=ACTION_TIMEOUT)
+                    typed = True
+                    break
+                except Exception as e:
+                    print(f"   尝试 {loc_strategy} 失败: {str(e)[:50]}")
+                    continue
+            
+            if not typed:
+                raise ValueError("所有定位策略都失败")
             
             print("✅ 输入成功")
             new_history[-1]["result"] = f"成功输入 '{value}'"
+        
+        elif action_type == "press":
+            key = decision.get("value", "Enter")
+            print(f"⌨️ 按下按键: {key}")
+            
+            try:
+                page.keyboard.press(key)
+                page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
+                print("✅ 按键成功")
+                new_history[-1]["result"] = f"成功按下 {key}"
+            except Exception as e:
+                raise ValueError(f"按键操作失败: {str(e)}")
         
         else:
             raise ValueError(f"未知的动作类型: {action_type}")
