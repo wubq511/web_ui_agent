@@ -23,10 +23,16 @@ from playwright.sync_api import sync_playwright, Page, Browser, Playwright
 
 from config import (
     API_BASE_URL, MODEL_NAME, LLM_TIMEOUT, LLM_TEMPERATURE,
-    ACTION_TIMEOUT, PAGE_LOAD_TIMEOUT
+    ACTION_TIMEOUT, PAGE_LOAD_TIMEOUT, MAX_STEPS,
+    DEFAULT_TASK_COMPLEXITY, DEFAULT_PROGRESS_LEVEL,
+    PROGRESS_STAGNATION_DEFAULT, DEFAULT_INTERVENTION_PAUSED,
+    DEFAULT_FAST_MODE, DEFAULT_STEPS_EXTENSION, MIN_REMAINING_STEPS_THRESHOLD
 )
 from state import AgentState, create_initial_state
-from nodes import perception_node, reasoning_node, action_node, should_continue
+from nodes import (
+    perception_node, reasoning_node, action_node, should_continue,
+    AgentContext
+)
 from utils import get_api_key
 
 
@@ -68,6 +74,8 @@ class WebUIAgent:
         self.browser: Browser = None
         self.page: Page = None
         
+        self.context = AgentContext()
+        
         self.graph = self._build_graph()
         print("✅ 状态图构建完成")
     
@@ -92,13 +100,16 @@ class WebUIAgent:
         """
         
         def perception_wrapper(state: AgentState) -> dict:
-            return perception_node(state, self.page)
+            return perception_node(state, self.page, self.context)
         
         def reasoning_wrapper(state: AgentState) -> dict:
-            return reasoning_node(state, self.llm)
+            return reasoning_node(state, self.llm, self.context)
         
         def action_wrapper(state: AgentState) -> dict:
-            return action_node(state, self.page)
+            return action_node(state, self.page, self.context)
+        
+        def should_continue_wrapper(state: AgentState) -> str:
+            return should_continue(state, self.context)
         
         graph = StateGraph(AgentState)
         
@@ -112,7 +123,7 @@ class WebUIAgent:
         graph.add_edge("reasoning", "action")
         graph.add_conditional_edges(
             "action",
-            should_continue,
+            should_continue_wrapper,
             {
                 "perception": "perception",
                 "end": END
@@ -121,7 +132,7 @@ class WebUIAgent:
         
         return graph.compile()
     
-    def _init_browser(self):
+    def _init_browser(self, storage_state: dict = None):
         """
         初始化浏览器
         
@@ -129,6 +140,7 @@ class WebUIAgent:
         使用 Playwright 的同步 API 启动浏览器。我们设置：
         1. headless=False - 显示浏览器窗口，便于观察执行过程
         2. slow_mo - 减慢操作速度，便于观察
+        3. storage_state - 恢复浏览器会话状态（cookies、localStorage等）
         """
         print("🌐 正在启动浏览器...")
         
@@ -137,8 +149,18 @@ class WebUIAgent:
             headless=False,
             slow_mo=100
         )
-        self.page = self.browser.new_page()
+        
+        if storage_state:
+            print("🔄 正在恢复浏览器会话状态...")
+            context = self.browser.new_context(storage_state=storage_state)
+            self.page = context.new_page()
+            print("✅ 浏览器会话状态已恢复")
+        else:
+            self.page = self.browser.new_page()
+        
         self.page.set_default_timeout(ACTION_TIMEOUT)
+        
+        self.context.set_page(self.page)
         
         print("✅ 浏览器启动成功")
     
@@ -181,6 +203,9 @@ class WebUIAgent:
         error_message = state.get('error_message', '')
         history = state.get('history', [])
         objective = state.get('objective', '未知任务')
+        termination_reason = state.get('termination_reason', '')
+        progress_ratio = state.get('progress_ratio', 0)
+        max_steps = state.get('max_steps', MAX_STEPS)
         
         status_icon = "✅" if is_done else "⚠️"
         status_text = "已完成" if is_done else "未完成"
@@ -198,6 +223,14 @@ class WebUIAgent:
                     <td style="padding: 8px; border: 1px solid #ddd;"><code>{action}</code></td>
                     <td style="padding: 8px; border: 1px solid #ddd;">{result[:100]}{'...' if len(result) > 100 else ''}</td>
                 </tr>
+            """
+        
+        termination_info = ""
+        if termination_reason:
+            termination_info = f"""
+                <div class='warning'>
+                    <strong>🛑 终止原因：</strong>{termination_reason}
+                </div>
             """
         
         html_content = f"""
@@ -293,6 +326,18 @@ class WebUIAgent:
                     margin: 20px 0;
                     border-radius: 4px;
                 }}
+                .progress-bar {{
+                    background-color: #e9ecef;
+                    border-radius: 10px;
+                    height: 20px;
+                    overflow: hidden;
+                }}
+                .progress-fill {{
+                    background-color: #28a745;
+                    height: 100%;
+                    width: {progress_ratio * 100}%;
+                    transition: width 0.3s ease;
+                }}
             </style>
         </head>
         <body>
@@ -310,9 +355,18 @@ class WebUIAgent:
                     </div>
                     <div class="info-item">
                         <span class="info-label">总步数：</span>
-                        <span class="info-value">{step_count}</span>
+                        <span class="info-value">{step_count} / {max_steps}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">完成进度：</span>
+                        <span class="info-value">{progress_ratio:.1%}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill"></div>
                     </div>
                 </div>
+                
+                {termination_info}
                 
                 {"<div class='warning'><strong>⚠️ 错误信息：</strong>" + error_message + "</div>" if error_message else ""}
                 
@@ -367,7 +421,10 @@ class WebUIAgent:
         
         self._close_browser()
     
-    def run(self, objective: str, start_url: str = None, keep_browser_open: bool = True) -> AgentState:
+    def run(self, objective: str, start_url: str = None, 
+            keep_browser_open: bool = True,
+            max_steps: int = None,
+            resume_from_checkpoint: str = None) -> AgentState:
         """
         运行 Agent 执行任务
         
@@ -375,6 +432,8 @@ class WebUIAgent:
         objective: str - 用户目标描述
         start_url: str - 起始页面 URL（可选）
         keep_browser_open: bool - 任务完成后是否保持浏览器打开（默认 True）
+        max_steps: int - 最大步骤限制（可选，默认使用配置值）
+        resume_from_checkpoint: str - 从检查点恢复的ID（可选）
         
         【工作流程】
         1. 初始化浏览器
@@ -396,22 +455,112 @@ class WebUIAgent:
             print(f"🌐 起始页面: {start_url}")
         print("═"*60 + "\n")
         
-        self._init_browser()
+        checkpoint_data = None
+        storage_state = None
+        if resume_from_checkpoint:
+            checkpoint_data = self.context.checkpoint_manager.load_checkpoint(
+                resume_from_checkpoint
+            )
+            if checkpoint_data:
+                storage_state = checkpoint_data.storage_state
+                if storage_state:
+                    print("📦 发现保存的浏览器会话状态")
+        
+        self._init_browser(storage_state=storage_state)
         
         try:
-            if start_url:
-                print(f"🌐 导航到起始页面: {start_url}")
-                self.page.goto(start_url, timeout=PAGE_LOAD_TIMEOUT)
-                self.page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
+            if checkpoint_data:
+                initial_state = checkpoint_data.state
+                
+                initial_state.setdefault("task_complexity", DEFAULT_TASK_COMPLEXITY.value)
+                initial_state.setdefault("progress_level", DEFAULT_PROGRESS_LEVEL)
+                initial_state.setdefault("adjusted_stagnation_threshold", PROGRESS_STAGNATION_DEFAULT)
+                initial_state.setdefault("intervention_paused", DEFAULT_INTERVENTION_PAUSED)
+                initial_state.setdefault("fast_mode", DEFAULT_FAST_MODE)
+                
+                self.context.step_manager = self.context.step_manager.from_dict(
+                    checkpoint_data.step_manager
+                )
+                self.context.completion_evaluator = self.context.completion_evaluator.from_dict(
+                    checkpoint_data.completion_evaluator
+                )
+                self.context.termination_manager = self.context.termination_manager.from_dict(
+                    checkpoint_data.termination_manager
+                )
+                
+                if max_steps and max_steps > self.context.step_manager.current_max_steps:
+                    self.context.step_manager.current_max_steps = max_steps
+                    print(f"📊 使用命令行指定的最大步骤: {max_steps}")
+                else:
+                    saved_step_count = initial_state.get("step_count", 0)
+                    remaining_steps = self.context.step_manager.current_max_steps - saved_step_count
+                    if remaining_steps < MIN_REMAINING_STEPS_THRESHOLD:
+                        new_max = saved_step_count + DEFAULT_STEPS_EXTENSION
+                        self.context.step_manager.adjust_max_steps(
+                            reason="恢复检查点时自动扩展（剩余步骤不足）",
+                            target_steps=new_max,
+                            current_step=saved_step_count
+                        )
+                
+                initial_state["max_steps"] = self.context.step_manager.current_max_steps
+                
+                saved_url = initial_state.get("current_url", "")
+                if saved_url and saved_url != "about:blank" and not saved_url.startswith("data:"):
+                    print(f"🌐 导航到检查点页面: {saved_url}")
+                    try:
+                        self.page.goto(saved_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                        try:
+                            self.page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
+                        except Exception:
+                            print("⚠️ 网络未完全空闲，继续执行...")
+                            self.page.wait_for_load_state("load", timeout=5000)
+                        initial_state["current_url"] = self.page.url
+                    except Exception as e:
+                        print(f"⚠️ 导航到检查点页面失败: {e}")
+                
+                print(f"✅ 已从检查点恢复: {resume_from_checkpoint}")
+                print(f"📊 恢复后最大步骤: {self.context.step_manager.current_max_steps}")
+                print(f"📝 已执行步骤: {initial_state.get('step_count', 0)}")
+            elif resume_from_checkpoint:
+                print("⚠️ 检查点加载失败，使用初始状态")
+                if max_steps:
+                    self.context.step_manager.current_max_steps = max_steps
+                initial_state = create_initial_state(
+                    objective=objective,
+                    current_url="",
+                    max_steps=self.context.step_manager.current_max_steps
+                )
+            else:
+                if max_steps:
+                    self.context.step_manager.current_max_steps = max_steps
+                    
+                if start_url:
+                    print(f"🌐 导航到起始页面: {start_url}")
+                    self.page.goto(start_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    try:
+                        self.page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
+                    except Exception:
+                        print("⚠️ 网络未完全空闲，继续执行...")
+                        self.page.wait_for_load_state("load", timeout=5000)
+                
+                initial_state = create_initial_state(
+                    objective=objective,
+                    current_url=self.page.url,
+                    max_steps=self.context.step_manager.current_max_steps
+                )
             
-            initial_state = create_initial_state(
-                objective=objective,
-                current_url=self.page.url
-            )
+            self.context.initialize(objective, start_url or "")
             
             final_state = self.graph.invoke(initial_state)
             
             self._print_summary(final_state)
+            
+            self.context.logger.log_session_end(
+                success=final_state.get('is_done', False),
+                step_count=final_state.get('step_count', 0),
+                duration=self.context.termination_manager.get_elapsed_time(),
+                reason=final_state.get('termination_reason', '')
+            )
             
             if keep_browser_open:
                 self._display_result_in_browser(final_state)
@@ -419,10 +568,13 @@ class WebUIAgent:
             else:
                 self._close_browser()
             
+            self.context.cleanup()
+            
             return final_state
             
         except Exception as e:
             print(f"\n❌ 执行过程中发生错误: {e}")
+            self.context.logger.log_error(str(e), 0)
             if keep_browser_open:
                 print("\n💡 浏览器保持打开，您可以查看错误现场")
                 print("   按 Enter 键关闭浏览器...")
@@ -431,6 +583,7 @@ class WebUIAgent:
                 except (EOFError, KeyboardInterrupt):
                     pass
             self._close_browser()
+            self.context.cleanup()
             raise
     
     def _print_summary(self, state: AgentState):
@@ -444,10 +597,17 @@ class WebUIAgent:
         print("📊 执行结果汇总")
         print("═"*60)
         print(f"✅ 总步数: {state['step_count']}")
+        print(f"📊 最大步骤: {state.get('max_steps', MAX_STEPS)}")
+        print(f"📈 完成进度: {state.get('progress_ratio', 0):.1%}")
         print(f"🎯 任务状态: {'已完成' if state['is_done'] else '未完成'}")
+        
+        if state.get("termination_reason"):
+            print(f"🛑 终止原因: {state['termination_reason']}")
         
         if state.get("error_message"):
             print(f"⚠️ 最后错误: {state['error_message']}")
+        
+        print(f"💾 检查点: {state.get('saved_checkpoint_id', '无')}")
         
         print("\n📜 执行历史:")
         for entry in state["history"]:
@@ -455,3 +615,15 @@ class WebUIAgent:
             action = entry.get("action_type", "?")
             result = entry.get("result", "?")[:50]
             print(f"   步骤{step}: {action} -> {result}")
+        
+        print("\n" + self.context.step_manager.get_adjustment_summary())
+        print("\n" + self.context.completion_evaluator.get_completion_summary())
+        print("\n" + self.context.logger.get_step_summary())
+    
+    def list_checkpoints(self, limit: int = 5):
+        """列出可用的检查点"""
+        self.context.checkpoint_manager.display_checkpoints(limit)
+    
+    def cleanup_old_checkpoints(self, max_age_hours: int = 24, keep_count: int = 5):
+        """清理过期检查点"""
+        self.context.checkpoint_manager.cleanup_old_checkpoints(max_age_hours, keep_count)

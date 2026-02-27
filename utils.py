@@ -176,3 +176,67 @@ def get_element_selector(element: Tag) -> str:
         return f"{element.name}[type='{element.get('type')}']"
     
     return element.name
+
+
+def _is_valid_css_id(id_value: str) -> bool:
+    """
+    检查 CSS ID 是否有效
+    
+    【设计思路】
+    CSS ID 选择器有一些限制：
+    1. 不能以数字开头
+    2. 不能包含某些特殊字符（如点号、冒号等）
+    
+    如果 ID 无效，我们需要使用属性选择器 [id="xxx"] 或转义。
+    
+    【参数】
+    id_value: str - 要检查的 ID 值
+    
+    【返回值】
+    bool: ID 是否可以直接用于 CSS 选择器
+    """
+    if not id_value:
+        return False
+    
+    if id_value[0].isdigit():
+        return False
+    
+    invalid_chars = {'.', ':', '[', ']', ' ', '#', '>', '+', '~', '*', '|', '^', '$', '@', '!', '%', '&', '(', ')', ',', ';', '<', '=', '?', '`', '{', '}', '/', '\\'}
+    
+    for char in id_value:
+        if char in invalid_chars:
+            return False
+    
+    return True
+
+
+def _escape_css_selector(selector: str) -> str:
+    """
+    转义 CSS 选择器，处理无效的 ID
+    
+    【设计思路】
+    当 ID 以数字开头或包含特殊字符时，直接使用 #id 会失败。
+    我们需要将其转换为属性选择器 [id="xxx"] 或使用 CSS 转义。
+    
+    【转义策略】
+    1. 如果是 ID 选择器（#开头），检查 ID 是否有效
+    2. 如果 ID 无效，转换为属性选择器 [id="xxx"]
+    3. 对于其他情况，保持原样
+    
+    【参数】
+    selector: str - 原始 CSS 选择器
+    
+    【返回值】
+    str: 修复后的 CSS 选择器
+    """
+    if not selector:
+        return selector
+    
+    if selector.startswith('#'):
+        id_value = selector[1:]
+        
+        if not _is_valid_css_id(id_value):
+            escaped_id = id_value.replace('\\', '\\\\').replace('"', '\\"')
+            return f'[id="{escaped_id}"]'
+    
+    return selector

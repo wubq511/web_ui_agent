@@ -18,7 +18,13 @@
 ================================================================================
 """
 
-from typing import TypedDict
+from typing import TypedDict, Optional
+from dataclasses import dataclass
+
+from config import (
+    MAX_STEPS, DEFAULT_TASK_COMPLEXITY, DEFAULT_PROGRESS_LEVEL,
+    PROGRESS_STAGNATION_DEFAULT, DEFAULT_INTERVENTION_PAUSED, DEFAULT_FAST_MODE
+)
 
 
 class AgentState(TypedDict):
@@ -130,15 +136,159 @@ class AgentState(TypedDict):
     2. 在历史记录中标识每一步
     3. 用于调试和性能分析
     """
+    
+    max_steps: int
+    """
+    max_steps: int - 当前最大步骤限制
+    
+    【作用】动态调整的最大步骤限制
+    【特点】可根据任务复杂度动态调整
+    【用途】支持复杂任务的完整执行
+    """
+    
+    error_count: int
+    """
+    error_count: int - 错误计数
+    
+    【作用】记录执行过程中的错误次数
+    【特点】每次出错时加 1
+    【用途】用于错误恢复和终止判断
+    """
+    
+    consecutive_success: int
+    """
+    consecutive_success: int - 连续成功次数
+    
+    【作用】记录连续成功执行的次数
+    【特点】成功时加 1，失败时重置为 0
+    【用途】用于判断是否应该扩展步骤限制
+    """
+    
+    progress_ratio: float
+    """
+    progress_ratio: float - 进度比率
+    
+    【作用】记录当前任务完成进度
+    【特点】范围 0.0 - 1.0
+    【用途】用于完成度评估和终止判断
+    """
+    
+    stagnation_count: int
+    """
+    stagnation_count: int - 停滞计数
+    
+    【作用】记录进度停滞的次数
+    【特点】进度无变化时加 1
+    【用途】用于检测任务卡住的情况
+    """
+    
+    task_complexity: str
+    """
+    task_complexity: str - 任务复杂度
+    
+    【作用】记录任务的复杂度级别
+    【特点】可选值: "simple", "medium", "complex"
+    【用途】用于动态调整终止阈值
+    """
+    
+    progress_level: str
+    """
+    progress_level: str - 进展程度
+    
+    【作用】记录当前的进展程度
+    【特点】可选值: "no_progress", "partial_progress", "significant_progress", "full_progress"
+    【用途】区分完全无进展和部分进展情况
+    """
+    
+    adjusted_stagnation_threshold: int
+    """
+    adjusted_stagnation_threshold: int - 调整后的停滞阈值
+    
+    【作用】根据任务复杂度动态调整的停滞阈值
+    【特点】范围 3-8，根据复杂度和执行步数动态变化
+    【用途】为复杂任务提供更多探索空间
+    """
+    
+    intervention_paused: bool
+    """
+    intervention_paused: bool - 人工干预暂停标志
+    
+    【作用】标记是否处于人工干预暂停状态
+    【特点】暂停时终止倒计时停止
+    【用途】允许在关键节点暂停终止倒计时
+    """
+    
+    fast_mode: bool
+    """
+    fast_mode: bool - 快速模式标志
+    
+    【作用】标记是否启用快速模式
+    【特点】快速模式使用更严格的终止条件
+    【用途】保留原机制作为快速任务处理模式的可选项
+    """
+    
+    termination_reason: Optional[str]
+    """
+    termination_reason: Optional[str] - 终止原因
+    
+    【作用】记录任务终止的原因
+    【特点】任务终止时设置
+    【用途】用于结果报告和调试
+    """
+    
+    saved_checkpoint_id: Optional[str]
+    """
+    saved_checkpoint_id: Optional[str] - 保存的检查点ID
+    
+    【作用】记录最近保存的检查点ID
+    【特点】保存检查点时设置
+    【用途】用于断点续接
+    """
+    
+    popup_detected: bool
+    """
+    popup_detected: bool - 弹窗/模态框检测标志
+    
+    【作用】标记当前页面是否检测到弹窗或模态框
+    【特点】在感知节点中检测并设置
+    【用途】帮助决策模块优先处理弹窗内容
+    """
+    
+    login_form_detected: bool
+    """
+    login_form_detected: bool - 登录表单检测标志
+    
+    【作用】标记当前页面是否检测到登录表单
+    【特点】在感知节点中检测并设置
+    【用途】帮助决策模块识别并处理登录场景
+    """
+    
+    login_elements: dict
+    """
+    login_elements: dict - 登录元素信息
+    
+    【作用】存储检测到的登录相关元素的ID
+    【结构】{
+        "username": 元素ID或None,
+        "password": 元素ID或None,
+        "submit": 元素ID或None,
+        "sms_code": 元素ID或None,
+        "get_code_btn": 元素ID或None
+    }
+    【用途】帮助决策模块快速定位登录相关元素
+    """
 
 
-def create_initial_state(objective: str, current_url: str = "") -> AgentState:
+def create_initial_state(objective: str, current_url: str = "", 
+                        max_steps: int = 10, fast_mode: bool = False) -> AgentState:
     """
     创建初始状态
     
     【参数】
     objective: str - 用户目标
     current_url: str - 当前页面 URL（默认为空）
+    max_steps: int - 初始最大步骤限制（默认为配置值）
+    fast_mode: bool - 是否启用快速模式（默认为 False）
     
     【返回值】
     AgentState: 初始化后的状态字典
@@ -150,5 +300,30 @@ def create_initial_state(objective: str, current_url: str = "") -> AgentState:
         history=[],
         error_message=None,
         is_done=False,
-        step_count=0
+        step_count=0,
+        max_steps=max_steps,
+        error_count=0,
+        consecutive_success=0,
+        progress_ratio=0.0,
+        stagnation_count=0,
+        task_complexity=DEFAULT_TASK_COMPLEXITY.value,
+        progress_level=DEFAULT_PROGRESS_LEVEL,
+        adjusted_stagnation_threshold=PROGRESS_STAGNATION_DEFAULT,
+        intervention_paused=DEFAULT_INTERVENTION_PAUSED,
+        fast_mode=fast_mode,
+        termination_reason=None,
+        saved_checkpoint_id=None,
+        popup_detected=False,
+        login_form_detected=False,
+        login_elements={"username": None, "password": None, "submit": None, "sms_code": None, "get_code_btn": None}
     )
+
+
+def state_to_dict(state: AgentState) -> dict:
+    """将状态转换为可序列化的字典"""
+    return dict(state)
+
+
+def dict_to_state(data: dict) -> AgentState:
+    """从字典创建状态"""
+    return AgentState(**data)

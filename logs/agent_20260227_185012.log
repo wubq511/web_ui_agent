@@ -1,0 +1,20 @@
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 | ============================================================
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 | 🚀 会话开始
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 |    会话ID: 20260227_185012
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 |    目标: 测试
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 |    起始URL: https://www.baidu.com
+2026-02-27 18:50:15 | INFO     | WebUIAgent_20260227_185012 | ============================================================
+2026-02-27 18:50:30 | ERROR    | WebUIAgent_20260227_185012 | ❌ 错误 (步骤 2): click失败: Locator.click: Element is not visible
+Call log:
+  - waiting for locator("#chat-submit-button").first
+    - locator resolved to <button id="chat-submit-button">↵                            百度一下↵               …</button>
+  - attempting click action
+    - scrolling into view if needed
+
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 | 🛑 终止: stagnation
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 |    详情: 进度停滞: 连续 5/5 次无进展 (复杂度: simple)
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 | ============================================================
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 | 🏁 会话结束: ❌ 未完成
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 |    总步骤: 12
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 |    总耗时: 236.40秒
+2026-02-27 18:54:11 | INFO     | WebUIAgent_20260227_185012 | ============================================================
