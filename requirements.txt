@@ -7,5 +7,34 @@ langchain-openai>=0.1.0
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 
-# 可选：环境变量管理（需要创建 .env 文件时使用）
+# Web服务器和API框架 (新增 - 用于前端通信)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+python-multipart>=0.0.6
+
+# CORS支持 (新增 - 允许前端跨域访问)
 python-dotenv>=1.0.0
+
+# 安全加密库（用于账号凭证管理）
+cryptography>=41.0.0
+
+# 可选：资源监控
+psutil>=5.9.0
+
+# 数据验证 (新增)
+pydantic>=2.5.0
+
+# 异步支持 (新增)
+asyncio-mqtt>=0.16.0
+aiofiles>=23.2.0
+
+# HTTP客户端 (新增 - 用于API调用)
+httpx>=0.25.0
+requests>=2.31.0
+
+# 图片处理 (新增 - 用于截图处理)
+Pillow>=10.1.0
+
+# 数据序列化 (新增)
+orjson>=3.9.0

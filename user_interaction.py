@@ -65,6 +65,15 @@ class UserCommand(Enum):
     FAST_MODE = "fast_mode"
     HELP = "help"
     UNKNOWN = "unknown"
+    CREDENTIAL_LOGIN = "credential_login"
+    CREDENTIAL_ADD = "credential_add"
+    CREDENTIAL_LIST = "credential_list"
+    CREDENTIAL_SEARCH = "credential_search"
+    CREDENTIAL_DELETE = "credential_delete"
+    CREDENTIAL_STATUS = "credential_status"
+    MODEL_SWITCH = "model_switch"
+    MODEL_LIST = "model_list"
+    MODEL_STATUS = "model_status"
 
 
 @dataclass
@@ -204,8 +213,10 @@ class UserInteractionManager:
             return
         
         self._running = True
-        self._input_thread = threading.Thread(target=self._input_listener, daemon=True)
-        self._input_thread.start()
+        # 注意：禁用后台线程，因为它会干扰 Playwright 的 greenlet
+        # 用户交互改为在主线程中通过 process_user_commands() 处理
+        # self._input_thread = threading.Thread(target=self._input_listener, daemon=True)
+        # self._input_thread.start()
         print("💬 用户交互已启用 (输入 'help' 查看可用命令)")
         print("   💡 提示: 直接输入命令后按 Enter 即可执行")
     
@@ -306,7 +317,19 @@ class UserInteractionManager:
             "f": UserCommand.FAST_MODE,
             "help": UserCommand.HELP,
             "h": UserCommand.HELP,
-            "?": UserCommand.HELP
+            "?": UserCommand.HELP,
+            "cred_login": UserCommand.CREDENTIAL_LOGIN,
+            "cred_add": UserCommand.CREDENTIAL_ADD,
+            "cred_list": UserCommand.CREDENTIAL_LIST,
+            "cred_search": UserCommand.CREDENTIAL_SEARCH,
+            "cred_del": UserCommand.CREDENTIAL_DELETE,
+            "cred_status": UserCommand.CREDENTIAL_STATUS,
+            "credential": UserCommand.CREDENTIAL_STATUS,
+            "cred": UserCommand.CREDENTIAL_STATUS,
+            "model": UserCommand.MODEL_STATUS,
+            "models": UserCommand.MODEL_LIST,
+            "switch": UserCommand.MODEL_SWITCH,
+            "m": UserCommand.MODEL_STATUS
         }
         
         command = command_map.get(cmd_str, UserCommand.UNKNOWN)
@@ -434,6 +457,14 @@ class UserInteractionManager:
   intervene (i) [n]- 人工干预：暂停终止倒计时 n秒 (默认60秒)
   fast (f)         - 切换快速模式（使用更严格的终止条件）
   help (h/?)       - 显示此帮助
+
+凭证管理命令:
+  cred_login       - 登录凭证管理器
+  cred_add         - 添加账号凭证
+  cred_list        - 列出所有凭证
+  cred_search [关键词] - 搜索凭证
+  cred_del [id]    - 删除凭证
+  cred_status      - 显示凭证管理器状态
 """
         return InteractionResponse(
             success=True,

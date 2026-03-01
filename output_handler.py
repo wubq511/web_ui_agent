@@ -1,6 +1,6 @@
 """
 ================================================================================
-输出处理器模块 - 管理详细输出的存储
+输出处理器模块 - 管理详细输出的存储（性能优化版）
 ================================================================================
 
 【模块概述】
@@ -11,6 +11,8 @@
 2. 每次运行创建独立的时间戳子文件夹
 3. 提供简洁的终端输出
 4. 支持按步骤组织输出文件
+5. 异步写入支持（高性能场景）
+6. 写入缓冲优化
 
 【设计思路】
 通过分离详细输出和简洁输出，让终端只显示关键信息，
@@ -22,33 +24,44 @@
 import os
 import json
 import shutil
+import threading
+import queue
+import atexit
 from datetime import datetime
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 
 class OutputHandler:
     """
-    输出处理器 - 管理详细输出的存储和显示
+    输出处理器 - 管理详细输出的存储和显示（性能优化版）
     
     【属性】
     process_dir: str - process 根文件夹路径
     session_dir: str - 当前会话的文件夹路径（时间戳命名）
     current_step: int - 当前步骤编号
     session_id: str - 会话ID（运行开始时间）
+    
+    【性能优化】
+    1. 异步写入支持
+    2. 写入缓冲
+    3. 批量写入
     """
     
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: str = None, async_mode: bool = True):
         """
         初始化输出处理器
         
         【参数】
         base_dir: str - 基础目录路径，默认为当前文件所在目录
+        async_mode: bool - 是否启用异步写入模式
         """
         if base_dir is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         
         self.process_dir = os.path.join(base_dir, "process")
         self.current_step = 0
+        self._async_mode = async_mode
         
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -59,6 +72,53 @@ class OutputHandler:
         
         if not os.path.exists(self.session_dir):
             os.makedirs(self.session_dir)
+        
+        self._write_buffer: list = []
+        self._buffer_lock = threading.Lock()
+        self._buffer_size = 10
+        
+        if async_mode:
+            self._write_queue: queue.Queue = queue.Queue()
+            self._executor = ThreadPoolExecutor(max_workers=1)
+            self._running = True
+            self._executor.submit(self._async_writer)
+            atexit.register(self._shutdown)
+    
+    def _shutdown(self):
+        """关闭异步写入线程"""
+        if self._async_mode:
+            self._running = False
+            self._write_queue.put(None)
+            self._executor.shutdown(wait=True)
+    
+    def _async_writer(self):
+        """异步写入线程"""
+        while self._running:
+            try:
+                item = self._write_queue.get(timeout=0.5)
+                if item is None:
+                    break
+                filepath, data = item
+                self._write_file_sync(filepath, data)
+            except queue.Empty:
+                continue
+            except Exception:
+                pass
+    
+    def _write_file_sync(self, filepath: str, data: dict):
+        """同步写入文件"""
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    
+    def _write_file(self, filepath: str, data: dict):
+        """写入文件（支持异步）"""
+        if self._async_mode:
+            self._write_queue.put((filepath, data))
+        else:
+            self._write_file_sync(filepath, data)
     
     def start_step(self, step: int):
         """
@@ -71,7 +131,7 @@ class OutputHandler:
     
     def write_elements(self, elements_dict: dict, url: str, iframe_info: list = None):
         """
-        将元素列表详细信息写入文件
+        将元素列表详细信息写入文件（性能优化版）
         
         【参数】
         elements_dict: dict - 元素字典
@@ -84,18 +144,9 @@ class OutputHandler:
         filename = f"step_{self.current_step:03d}_elements.json"
         filepath = os.path.join(self.session_dir, filename)
         
-        data = {
-            "step": self.current_step,
-            "timestamp": datetime.now().isoformat(),
-            "url": url,
-            "total_elements": len(elements_dict),
-            "iframe_count": len(iframe_info) if iframe_info else 0,
-            "iframe_details": iframe_info if iframe_info else [],
-            "elements": {}
-        }
-        
+        elements_data = {}
         for eid, info in elements_dict.items():
-            element_data = {
+            elements_data[str(eid)] = {
                 "id": eid,
                 "type": info.get("type", ""),
                 "text": info.get("text", ""),
@@ -110,10 +161,18 @@ class OutputHandler:
                 "xpath": info.get("xpath", ""),
                 "frame": info.get("frame")
             }
-            data["elements"][str(eid)] = element_data
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        data = {
+            "step": self.current_step,
+            "timestamp": datetime.now().isoformat(),
+            "url": url,
+            "total_elements": len(elements_dict),
+            "iframe_count": len(iframe_info) if iframe_info else 0,
+            "iframe_details": iframe_info if iframe_info else [],
+            "elements": elements_data
+        }
+        
+        self._write_file(filepath, data)
         
         return os.path.join(self.session_id, filename)
     
@@ -139,8 +198,7 @@ class OutputHandler:
             "decision": decision
         }
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_file(filepath, data)
         
         return os.path.join(self.session_id, filename)
     
@@ -173,8 +231,7 @@ class OutputHandler:
             "error": error
         }
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_file(filepath, data)
         
         return os.path.join(self.session_id, filename)
     
@@ -198,8 +255,7 @@ class OutputHandler:
             "history": history
         }
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_file(filepath, data)
         
         return os.path.join(self.session_id, filename)
     
@@ -227,8 +283,7 @@ class OutputHandler:
             "termination_reason": termination_reason
         }
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_file(filepath, data)
         
         return os.path.join(self.session_id, filename)
     
@@ -266,28 +321,39 @@ class OutputHandler:
                 shutil.rmtree(session_path)
             except Exception:
                 pass
+    
+    def flush(self):
+        """刷新写入缓冲区"""
+        if self._async_mode:
+            while not self._write_queue.empty():
+                import time
+                time.sleep(0.1)
 
 
 _output_handler: Optional[OutputHandler] = None
 
 
-def get_output_handler(base_dir: str = None) -> OutputHandler:
+def get_output_handler(base_dir: str = None, async_mode: bool = False) -> OutputHandler:
     """
     获取全局输出处理器实例
     
     【参数】
     base_dir: str - 基础目录路径
+    async_mode: bool - 是否启用异步模式（默认禁用，避免线程冲突）
     
     【返回值】
     OutputHandler: 输出处理器实例
     """
     global _output_handler
     if _output_handler is None:
-        _output_handler = OutputHandler(base_dir)
+        _output_handler = OutputHandler(base_dir, async_mode)
     return _output_handler
 
 
 def reset_output_handler():
     """重置全局输出处理器（用于开始新的会话）"""
     global _output_handler
+    if _output_handler is not None:
+        _output_handler.flush()
+        _output_handler._shutdown()
     _output_handler = None

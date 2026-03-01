@@ -46,7 +46,7 @@ python main.py -o "购买 iPhone" -u "https://www.apple.com.cn" -m 50
 import os
 import argparse
 
-from config import ENV_API_KEY_NAME
+from config import ENV_API_KEY_NAME, AVAILABLE_MODELS, DEFAULT_MODEL, AUTO_SWITCH_TARGET_MODEL
 from agent import WebUIAgent
 from output_handler import reset_output_handler
 
@@ -77,6 +77,9 @@ def create_parser() -> argparse.ArgumentParser:
   timeout [n]      - 设置超时时间(秒)
   intervene (i) [n]- 人工干预：暂停终止倒计时 n秒 (默认60秒)
   fast (f)         - 切换快速模式（使用更严格的终止条件）
+  model (m)        - 显示当前模型状态
+  models           - 列出所有可用模型
+  switch <model>   - 切换到指定模型
   help (h/?)       - 显示此帮助
         """
     )
@@ -84,10 +87,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o", "--objective",
         type=str,
-        default="""发邮件给wbq20071104@163.com,正文：晚上好
-        >> 账号信息：
-        >> 邮箱账号：tsts19891213@126.com
-        >> 邮箱密码：Qwqwqwqwqw123
+        default="""用我的126邮箱发邮件给wbq20071104@163.com,正文：晚上好
         """,
         help="任务目标描述 (默认: 无)"
     )
@@ -146,6 +146,20 @@ def create_parser() -> argparse.ArgumentParser:
         help="清理时保留的最少检查点数 (默认: 5)"
     )
     
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        choices=list(AVAILABLE_MODELS.keys()),
+        help=f"指定使用的模型 (默认: {DEFAULT_MODEL})"
+    )
+    
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="列出所有可用模型"
+    )
+    
     return parser
 
 
@@ -178,8 +192,23 @@ def main():
     
     reset_output_handler()
     
+    if args.list_models:
+        print("\n📋 可用模型列表:")
+        print("=" * 60)
+        for model_id, config in AVAILABLE_MODELS.items():
+            is_default = " (默认)" if model_id == DEFAULT_MODEL else ""
+            is_auto = " [支持自动切换]" if config.get("supports_auto_switch", False) else " [仅手动切换]"
+            print(f"\n  {model_id}{is_default}{is_auto}")
+            print(f"    名称: {config['name']}")
+            print(f"    描述: {config['description']}")
+            print(f"    标签: {', '.join(config['tags'])}")
+        print("\n" + "=" * 60)
+        print(f"💡 使用 --model <模型ID> 指定初始模型")
+        print(f"💡 自动切换仅切换到 {AUTO_SWITCH_TARGET_MODEL}（最强模型）")
+        return 0
+    
     try:
-        agent = WebUIAgent()
+        agent = WebUIAgent(model=args.model)
         
         if args.list_checkpoints:
             print("\n📋 可用的检查点:")

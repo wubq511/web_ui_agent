@@ -36,6 +36,84 @@ class TaskComplexity(Enum):
 API_BASE_URL = "https://api.lingyaai.cn/v1"
 MODEL_NAME = "gemini-3-flash-preview"
 
+# ============================================================================
+# 多模型配置 - 支持自主切换
+# ============================================================================
+# 可用模型列表，Agent可在这些模型之间自主切换
+# 每个模型包含: 名称、描述、优先级、特点标签、是否支持自动切换
+#
+# 【模型切换策略】
+# - 默认模型: gemini-3-flash-preview（速度快，成本低）
+# - 自动切换目标: claude-opus-4-6（最强模型，所有模型失败时都自动切换到此模型）
+# - 其他模型: 支持命令行指定、运行时切换，也支持自动切换到 claude
+AVAILABLE_MODELS = {
+    "gemini-3-flash-preview": {
+        "name": "Gemini 3 Flash Preview",
+        "description": "Google Gemini 3 Flash 预览版，速度快，成本低",
+        "priority": 1,
+        "tags": ["fast", "cost-effective", "general"],
+        "max_tokens": 8192,
+        "supports_vision": False,
+        "supports_auto_switch": True,
+    },
+    "kimi-k2.5": {
+        "name": "Kimi K2.5",
+        "description": "月之暗面 Kimi K2.5，中文理解能力强，agent能力强",
+        "priority": 2,
+        "tags": ["chinese", "reasoning", "long-context"],
+        "max_tokens": 8192,
+        "supports_vision": False,
+        "supports_auto_switch": True,
+    },
+    "claude-opus-4-6": {
+        "name": "Claude Opus 4.6",
+        "description": "Anthropic Claude Opus 4.6，最强agent模型，推理能力最强，支持复杂任务",
+        "priority": 3,
+        "tags": ["reasoning", "complex-tasks", "safety"],
+        "max_tokens": 4096,
+        "supports_vision": False,
+        "supports_auto_switch": True,
+    },
+    "doubao-seed-2-0-pro": {
+        "name": "Doubao Seed 2.0 Pro",
+        "description": "字节跳动豆包 Seed 2.0 Pro，性价比高",
+        "priority": 4,
+        "tags": ["chinese", "cost-effective", "fast"],
+        "max_tokens": 8192,
+        "supports_vision": False,
+        "supports_auto_switch": True,
+    },
+    "minimax-m2.5": {
+        "name": "MiniMax M2.5",
+        "description": "MiniMax M2.5，创意能力强",
+        "priority": 5,
+        "tags": ["creative", "chinese", "reasoning"],
+        "max_tokens": 8192,
+        "supports_vision": False,
+        "supports_auto_switch": True,
+    },
+}
+
+# 默认模型
+DEFAULT_MODEL = "gemini-3-flash-preview"
+
+# 自动切换的目标模型（失败时自动切换到此模型）
+AUTO_SWITCH_TARGET_MODEL = "claude-opus-4-6"
+
+# 模型切换配置
+MODEL_SWITCH_CONFIG = {
+    # 连续失败多少次后触发模型切换
+    "failure_threshold": 3,
+    # 成功调用多少次后可以考虑切换回默认模型
+    "success_threshold": 5,
+    # 是否启用自动切换（False则只使用默认模型）
+    "auto_switch_enabled": True,
+    # 切换冷却时间（秒），避免频繁切换
+    "switch_cooldown": 30,
+    # 是否在错误时自动切换模型
+    "switch_on_error": True,
+}
+
 MAX_STEPS = 10
 MIN_STEPS = 5
 MAX_STEPS_LIMIT = 100
@@ -141,3 +219,12 @@ DEFAULT_INTERVENTION_PAUSED = False
 DEFAULT_FAST_MODE = False
 DEFAULT_STEPS_EXTENSION = 25
 MIN_REMAINING_STEPS_THRESHOLD = 10
+
+# 代理配置（用于绕过IP检测）
+# 格式: http://user:pass@host:port 或 http://host:port
+# 建议使用住宅代理以获得更好的效果
+PROXY_SERVER = None  # 例如: "http://127.0.0.1:7890"
+
+# 本地Chrome路径（Windows默认路径）
+LOCAL_CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+LOCAL_CHROME_USER_DATA_DIR = r"C:\chrome_dev_profile"

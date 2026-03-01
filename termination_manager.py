@@ -597,6 +597,9 @@ class TerminationManager:
         """
         检查进度停滞 - 增强版，支持动态阈值和进展程度
         
+        【注意】
+        进度停滞时不再自动终止，而是由决策节点暂停等待用户干预
+        
         【参数】
         stagnation_count: 当前停滞计数
         progress_level: 进展程度（可选）
@@ -614,12 +617,14 @@ class TerminationManager:
         
         threshold = self.adjusted_stagnation_threshold
         
+        # 停滞时不再自动终止，而是返回警告
+        # 决策节点会检测停滞并暂停等待用户干预
         if stagnation_count >= threshold:
             return TerminationCheck(
-                should_terminate=True,
+                should_terminate=False,  # 改为不终止，由决策节点处理
                 reason=TerminationReason.STAGNATION,
-                message=f"进度停滞: 连续 {stagnation_count}/{threshold} 次无进展 (复杂度: {self.task_complexity.value})",
-                severity="high"
+                message=f"进度停滞: 连续 {stagnation_count}/{threshold} 次无进展 (复杂度: {self.task_complexity.value})，等待用户干预",
+                severity="warning"  # 改为警告级别
             )
         
         if stagnation_count >= threshold * 0.7:

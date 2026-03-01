@@ -273,9 +273,64 @@ class AgentState(TypedDict):
         "password": 元素ID或None,
         "submit": 元素ID或None,
         "sms_code": 元素ID或None,
-        "get_code_btn": 元素ID或None
+        "get_code_btn": 元素ID或None,
+        "password_switch": 元素ID或None (密码登录切换按钮)
     }
     【用途】帮助决策模块快速定位登录相关元素
+    """
+    
+    screenshot_path: Optional[str]
+    """
+    screenshot_path: Optional[str] - 页面截图路径
+    
+    【作用】存储当前页面截图的文件路径
+    【特点】每次感知节点执行时自动截图
+    【用途】帮助用户和LLM了解页面布局，辅助决策
+    """
+    
+    consecutive_scrolls: int
+    """
+    consecutive_scrolls: int - 连续滚动次数
+    
+    【作用】记录连续执行滚动操作的次数
+    【特点】每次非滚动操作后重置为0
+    【用途】检测是否在盲目滚动寻找元素，触发截图辅助
+    """
+    
+    need_manual_intervention: bool
+    """
+    need_manual_intervention: bool - 是否需要人工干预
+    
+    【作用】标记当前页面是否需要人工干预
+    【特点】在感知节点中检测验证码等需要人工处理的情况
+    【用途】触发暂停等待用户操作
+    """
+    
+    manual_intervention_reason: list
+    """
+    manual_intervention_reason: list - 需要人工干预的原因
+    
+    【作用】存储需要人工干预的原因列表
+    【示例】["图形验证码", "短信验证码"]
+    【用途】向用户展示需要处理的内容
+    """
+    
+    captcha_detected: bool
+    """
+    captcha_detected: bool - 是否检测到验证码
+    
+    【作用】标记是否检测到图形验证码/滑块验证等
+    【特点】需要用户手动完成验证
+    【用途】触发人工干预提示
+    """
+    
+    sms_code_input_detected: bool
+    """
+    sms_code_input_detected: bool - 是否检测到短信验证码输入框
+    
+    【作用】标记是否检测到短信验证码输入框
+    【特点】需要用户手动输入验证码
+    【用途】触发人工干预提示
     """
 
 
@@ -315,7 +370,13 @@ def create_initial_state(objective: str, current_url: str = "",
         saved_checkpoint_id=None,
         popup_detected=False,
         login_form_detected=False,
-        login_elements={"username": None, "password": None, "submit": None, "sms_code": None, "get_code_btn": None}
+        login_elements={"username": None, "password": None, "submit": None, "sms_code": None, "get_code_btn": None},
+        screenshot_path=None,
+        consecutive_scrolls=0,
+        need_manual_intervention=False,
+        manual_intervention_reason=[],
+        captcha_detected=False,
+        sms_code_input_detected=False
     )
 
 

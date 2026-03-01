@@ -100,11 +100,17 @@ class CheckpointManager:
             print(f"⚠️ 保存检查点列表失败: {e}")
     
     def generate_checkpoint_id(self, objective: str, step_count: int) -> str:
-        """生成检查点ID"""
-        timestamp = int(time.time() * 1000)
-        content = f"{objective}_{step_count}_{timestamp}"
+        """
+        生成检查点ID
+        
+        【格式】
+        cp_{易读时间}_{短哈希}
+        例如: cp_20260228_120530_a1b2c3d4
+        """
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        content = f"{objective}_{step_count}_{timestamp_str}"
         hash_value = hashlib.md5(content.encode()).hexdigest()[:8]
-        return f"cp_{timestamp}_{hash_value}"
+        return f"cp_{timestamp_str}_{hash_value}"
     
     def should_save_checkpoint(self, current_step: int) -> bool:
         """判断是否应该保存检查点"""

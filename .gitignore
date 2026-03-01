@@ -1,0 +1,131 @@
+# Web UI Agent - Git Ignore Configuration
+# 此文件用于防止敏感数据被提交到版本控制系统
+
+# ========================================
+# 敏感数据目录 - 绝对不要提交！
+# ========================================
+
+# 凭证数据（包含加密的账号密码）
+credential_data/
+
+# 日志文件（可能包含敏感信息）
+logs/
+
+# 检查点文件（可能包含会话状态）
+checkpoints/
+
+# 流程记录（可能包含敏感操作记录）
+process/
+
+# 备份文件
+backups/
+*.backup
+*.bak
+
+# ========================================
+# 环境配置文件
+# ========================================
+
+# 环境变量文件（可能包含API密钥）
+.env
+.env.local
+.env.*.local
+*.env
+
+# 本地配置
+config.local.json
+settings.local.json
+
+# ========================================
+# Python 相关
+# ========================================
+
+# 字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C 扩展
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# 分发/打包
+dist/
+build/
+*.egg-info/
+*.egg
+
+# 测试覆盖率
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# ========================================
+# IDE 和编辑器
+# ========================================
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# ========================================
+# 操作系统文件
+# ========================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ========================================
+# 临时文件
+# ========================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ========================================
+# 敏感文件类型
+# ========================================
+
+# 密钥文件
+*.pem
+*.key
+*.crt
+*.p12
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 压缩文件（可能包含敏感数据）
+*.zip
+*.tar.gz
+*.rar

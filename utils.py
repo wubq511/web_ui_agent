@@ -68,7 +68,7 @@ def get_api_key() -> str:
 
 def parse_json_from_response(response_text: str) -> dict:
     """
-    从 LLM 响应中解析 JSON
+    从 LLM 响应中解析 JSON（性能优化版）
     
     【设计思路】
     大语言模型有时会在 JSON 前后添加 Markdown 标记（如 ```json ... ```），
@@ -88,17 +88,21 @@ def parse_json_from_response(response_text: str) -> dict:
     """
     cleaned_text = response_text.strip()
     
-    json_block_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
-    match = re.search(json_block_pattern, cleaned_text)
+    if cleaned_text.startswith('```'):
+        first_newline = cleaned_text.find('\n')
+        if first_newline != -1:
+            cleaned_text = cleaned_text[first_newline + 1:]
+        
+        if cleaned_text.endswith('```'):
+            cleaned_text = cleaned_text[:-3]
+        
+        cleaned_text = cleaned_text.strip()
     
-    if match:
-        cleaned_text = match.group(1).strip()
+    first_brace = cleaned_text.find('{')
+    last_brace = cleaned_text.rfind('}')
     
-    json_obj_pattern = r'\{[\s\S]*\}'
-    match = re.search(json_obj_pattern, cleaned_text)
-    
-    if match:
-        cleaned_text = match.group(0)
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        cleaned_text = cleaned_text[first_brace:last_brace + 1]
     
     try:
         return json.loads(cleaned_text)
@@ -240,3 +244,44 @@ def _escape_css_selector(selector: str) -> str:
             return f'[id="{escaped_id}"]'
     
     return selector
+
+
+def validate_url(url: str) -> tuple[bool, str]:
+    """
+    验证 URL 格式是否有效
+    
+    【设计思路】
+    检查 URL 是否符合基本格式要求，包括协议、域名等。
+    
+    【参数】
+    url: str - 要验证的 URL
+    
+    【返回值】
+    tuple[bool, str]: (是否有效, 修复后的URL或错误信息)
+    """
+    if not url:
+        return False, "URL 为空"
+    
+    url = url.strip()
+    
+    if not url.startswith(('http://', 'https://')):
+        if '.' in url and not url.startswith(('javascript:', 'data:', 'file:')):
+            url = 'https://' + url
+        else:
+            return False, f"无效的 URL 格式: {url}"
+    
+    url_pattern = re.compile(
+        r'^https?://'  # 协议
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # 域名
+        r'localhost|'  # localhost
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # IP 地址
+        r'(?::\d+)?'  # 端口
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    
+    if url_pattern.match(url):
+        return True, url
+    
+    if '.' in url and len(url) > 10:
+        return True, url
+    
+    return False, f"URL 格式验证失败: {url}"
