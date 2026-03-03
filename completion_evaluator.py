@@ -108,6 +108,13 @@ class CompletionEvaluator:
         
         【返回值】
         TaskComplexity: 任务复杂度级别
+        
+        【评估规则】（修正版 v2）
+        - very_complex_score >= 1 或 complex_score >= 3 → VERY_COMPLEX
+        - complex_score >= 1 → COMPLEX（单个complex关键词即可）
+        - medium_score >= 2 → MEDIUM
+        - medium_score >= 1 或 simple_score >= 2 → MEDIUM
+        - 否则 → SIMPLE
         """
         objective_lower = objective.lower()
         
@@ -132,11 +139,14 @@ class CompletionEvaluator:
             if keyword.lower() in objective_lower:
                 simple_score += 1
         
+        # 修正后的评估规则 v2
         if very_complex_score >= 1 or complex_score >= 3:
             return TaskComplexity.VERY_COMPLEX
-        elif complex_score >= 2 or (complex_score >= 1 and medium_score >= 2):
+        elif complex_score >= 1:
             return TaskComplexity.COMPLEX
-        elif medium_score >= 2 or (medium_score >= 1 and complex_score >= 1):
+        elif medium_score >= 2:
+            return TaskComplexity.MEDIUM
+        elif medium_score >= 1 or simple_score >= 2:
             return TaskComplexity.MEDIUM
         else:
             return TaskComplexity.SIMPLE

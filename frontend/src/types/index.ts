@@ -99,6 +99,7 @@ export interface ModelConfig {
  * - taskComplexity: 任务复杂度
  * - popupDetected: 是否检测到弹窗
  * - loginFormDetected: 是否检测到登录表单
+ * - credentialManagerLoggedIn: 凭证管理器是否已登录
  */
 export interface AgentState {
   objective: string;
@@ -114,6 +115,7 @@ export interface AgentState {
   taskComplexity: string;
   popupDetected: boolean;
   loginFormDetected: boolean;
+  credentialManagerLoggedIn: boolean;
 }
 
 /**
@@ -177,4 +179,106 @@ export interface Action {
   description: string;
   timestamp: string;
   success: boolean;
+}
+
+/**
+ * 终端行类型
+ *
+ * 【类型说明】
+ * - output: 普通输出
+ * - error: 错误输出
+ * - warning: 警告输出
+ * - success: 成功输出
+ * - prompt: 输入提示
+ * - input: 用户输入
+ * - system: 系统消息
+ */
+export type TerminalLineType = 'output' | 'error' | 'warning' | 'success' | 'prompt' | 'input' | 'system';
+
+/**
+ * 终端行接口
+ *
+ * 【字段说明】
+ * - id: 唯一标识符
+ * - timestamp: 时间戳
+ * - type: 行类型
+ * - content: 行内容
+ */
+export interface TerminalLine {
+  id: string;
+  timestamp: string;
+  type: TerminalLineType;
+  content: string;
+}
+
+/**
+ * 终端状态接口
+ *
+ * 【字段说明】
+ * - lines: 终端输出行
+ * - waitingForInput: 是否等待用户输入
+ * - inputPrompt: 输入提示信息
+ */
+export interface TerminalState {
+  lines: TerminalLine[];
+  waitingForInput: boolean;
+  inputPrompt: string;
+}
+
+/**
+ * 文件信息接口
+ *
+ * 【字段说明】
+ * - name: 文件名
+ * - path: 文件完整路径
+ * - type: 文件类型 (log, session, performance, action, decision, elements)
+ * - size: 文件大小（字节）
+ * - modified: 最后修改时间
+ * - category: 文件分类 (logs, process, performance)
+ */
+export interface FileInfo {
+  name: string;
+  path: string;
+  type: string;
+  size: number;
+  modified: string;
+  category: 'logs' | 'process' | 'performance';
+}
+
+/**
+ * 任务分组接口
+ *
+ * 【字段说明】
+ * - task_id: 任务唯一标识
+ * - task_time: 任务时间描述
+ * - logs: 日志文件列表
+ * - process: 过程文件列表
+ * - performance: 性能文件列表
+ */
+export interface TaskGroup {
+  task_id: string;
+  task_time: string;
+  logs: FileInfo[];
+  process: FileInfo[];
+  performance: FileInfo[];
+}
+
+/**
+ * 文件内容响应接口
+ *
+ * 【字段说明】
+ * - content: 文件内容（JSON对象或字符串）
+ * - format: 内容格式 (json, text)
+ * - size: 文件大小
+ * - name: 文件名
+ * - type: 文件扩展名
+ * - error: 错误信息（可选）
+ */
+export interface FileContentResponse {
+  content: unknown | string | null;
+  format: 'json' | 'text';
+  size: number;
+  name: string;
+  type: string;
+  error?: string;
 }

@@ -128,14 +128,6 @@ const Header: React.FC = () => {
 
       {/* 右侧：状态显示区域 */}
       <div className="flex items-center gap-4">
-        {/* 版本号 */}
-        <span className="text-xs text-slate-500 font-medium">
-          VERSION 0.8.2
-        </span>
-
-        {/* 分隔线 */}
-        <div className="w-px h-4 bg-white/10" />
-
         {/* 状态指示器 */}
         <div className="flex items-center gap-3">
           <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">

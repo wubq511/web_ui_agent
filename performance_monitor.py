@@ -34,6 +34,8 @@ from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
+from task_manager import get_current_task_id
+
 
 @dataclass
 class PerformanceMetric:
@@ -155,7 +157,8 @@ class PerformanceMonitor:
                  max_metrics: int = 10000,
                  sample_rate: float = 1.0,
                  async_mode: bool = False,
-                 alert_callback: AlertCallback = None):
+                 alert_callback: AlertCallback = None,
+                 task_id: str = None):
         """
         初始化性能监控器
         
@@ -165,6 +168,7 @@ class PerformanceMonitor:
         sample_rate: 采样率（0.0-1.0，1.0表示100%采样）
         async_mode: 是否启用异步模式（高性能场景）
         alert_callback: 告警回调函数
+        task_id: 任务ID，如果不提供则从任务管理器获取
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -178,7 +182,13 @@ class PerformanceMonitor:
         self._metrics: List[PerformanceMetric] = []
         self._stage_stats: Dict[str, StageMetrics] = {}
         self._session_start = time.time()
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if task_id:
+            self._session_id = task_id
+        else:
+            self._session_id = get_current_task_id()
+            if not self._session_id:
+                self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         self._slow_operations: List[PerformanceMetric] = []
         self._optimization_flags: Dict[str, int] = defaultdict(int)
@@ -501,7 +511,9 @@ class PerformanceMonitor:
             self._slow_operations.clear()
             self._optimization_flags.clear()
             self._session_start = time.time()
-            self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._session_id = get_current_task_id()
+            if not self._session_id:
+                self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             self._sample_counter = 0
             self._dropped_count = 0
 

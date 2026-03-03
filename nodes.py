@@ -3579,6 +3579,10 @@ def should_continue(state: AgentState, context: AgentContext) -> str:
         stagnation_threshold=current_stagnation_threshold
     )
     
+    # 打印进度信息，供 web_server.py 解析并更新前端进度条
+    # 格式: "📊 进度: XX% | 停滞: X/X"
+    print_progress_hint(assessment.progress_ratio, assessment.stagnation_count, current_stagnation_threshold)
+    
     if assessment.task_complexity != context.termination_manager.task_complexity:
         context.termination_manager.set_task_complexity(assessment.task_complexity)
         print(f"📊 任务复杂度更新: {assessment.task_complexity.value}, 停滞阈值: {context.termination_manager.adjusted_stagnation_threshold}")

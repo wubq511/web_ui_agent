@@ -135,3 +135,60 @@ body {
 .animate-glow {
   animation: glow 2s ease-in-out infinite alternate;
 }
+
+/* 区域切换动画 - 流畅自然 */
+@keyframes fadeInScale {
+  0% {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fadeOutScale {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+/* 终端进入动画 */
+.animate-terminal-enter {
+  animation: fadeInScale 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 文件面板进入动画 */
+.animate-files-enter {
+  animation: fadeInScale 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 区域切换容器 - 平滑过渡 */
+.region-transition {
+  position: relative;
+}
+
+/* 进入动画 */
+.animate-enter {
+  animation: fadeInScale 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 状态指示器脉冲 */
+@keyframes statusPulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-status-pulse {
+  animation: statusPulse 1.5s ease-in-out infinite;
+}

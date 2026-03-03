@@ -1,227 +1,412 @@
 /**
  * ================================================================================
- * API 服务模块 - 模拟数据版本（无后端交互）
+ * API 服务模块 - 真实后端交互版本
  * ================================================================================
  *
  * 【模块概述】
- * 提供模拟的 API 和 WebSocket 客户端，用于前端开发和测试。
- * 所有数据都是本地生成的模拟数据，不与后端交互。
+ * 提供真实的 API 和 WebSocket 客户端，与后端 FastAPI 服务器交互。
  *
  * 【功能说明】
- * 1. 模拟 HTTP API: 返回模拟的成功响应
- * 2. 模拟 WebSocket: 通过定时器模拟实时状态更新
+ * 1. HTTP API: 与后端 REST API 交互
+ * 2. WebSocket: 实时接收状态更新和命令输出
  *
  * 【设计思路】
- * 1. 保持与真实 API 相同的接口，方便后续切换回真实后端
- * 2. 使用定时器模拟 WebSocket 消息推送
+ * 1. 使用 fetch API 进行 HTTP 请求
+ * 2. 使用原生 WebSocket 进行实时通信
  * 3. 提供类型安全的 API 接口
+ * 4. 自动重连机制
  * ================================================================================
  */
 
-import type { AgentState, LogEntry } from '../types';
+import type { AgentState, LogEntry, FileInfo, TaskGroup, FileContentResponse } from '../types';
 
-// 模拟延迟时间（毫秒）
-const MOCK_DELAY = 500;
+// API 基础 URL
+const API_BASE_URL = 'http://localhost:8000';
+const WS_BASE_URL = 'ws://localhost:8000/ws';
 
 /**
- * 模拟 HTTP API 客户端类
+ * HTTP API 客户端类
  *
  * 【功能说明】
- * 提供与真实 API 相同的接口，但返回模拟数据
+ * 提供与后端 API 交互的方法
  */
 class ApiClient {
-  // baseUrl 保留用于将来可能的扩展
-  private _baseUrl: string;
+  private baseUrl: string;
 
   constructor(baseUrl: string) {
-    this._baseUrl = baseUrl;
+    this.baseUrl = baseUrl;
   }
 
   /**
-   * 模拟延迟
+   * 发送 HTTP 请求
    */
-  private delay(ms: number = MOCK_DELAY): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`;
+    
+    const defaultHeaders: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+
+    const config: RequestInit = {
+      ...options,
+      headers: {
+        ...defaultHeaders,
+        ...options.headers,
+      },
+    };
+
+    try {
+      const response = await fetch(url, config);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      return await response.json();
+    } catch (error) {
+      if (error instanceof TypeError && error.message === 'Failed to fetch') {
+        throw new Error('无法连接到后端服务器，请确保后端服务已启动 (python web_server.py)');
+      }
+      throw error;
+    }
   }
 
   /**
-   * 启动 Agent（模拟）
+   * 启动 Agent
    */
   async startAgent(objective: string, model: string): Promise<{ success: boolean; message: string }> {
-    await this.delay();
-    console.log('[Mock API] startAgent called:', { objective, model });
-    return { success: true, message: `Agent started with objective: ${objective}` };
+    return this.request('/api/agent/start', {
+      method: 'POST',
+      body: JSON.stringify({ objective, model }),
+    });
   }
 
   /**
-   * 暂停 Agent（模拟）
+   * 暂停 Agent
    */
   async pauseAgent(): Promise<{ success: boolean; message: string }> {
-    await this.delay();
-    console.log('[Mock API] pauseAgent called');
-    return { success: true, message: 'Agent paused' };
+    return this.request('/api/agent/pause', {
+      method: 'POST',
+    });
   }
 
   /**
-   * 恢复 Agent（模拟）
+   * 恢复 Agent
    */
   async resumeAgent(): Promise<{ success: boolean; message: string }> {
-    await this.delay();
-    console.log('[Mock API] resumeAgent called');
-    return { success: true, message: 'Agent resumed' };
+    return this.request('/api/agent/resume', {
+      method: 'POST',
+    });
   }
 
   /**
-   * 停止 Agent（模拟）
+   * 停止 Agent
    */
   async stopAgent(): Promise<{ success: boolean; message: string }> {
-    await this.delay();
-    console.log('[Mock API] stopAgent called');
-    return { success: true, message: 'Agent stopped' };
+    return this.request('/api/agent/stop', {
+      method: 'POST',
+    });
   }
 
   /**
-   * 重置 Agent（模拟）
+   * 重置 Agent
    */
   async resetAgent(): Promise<{ success: boolean; message: string }> {
-    await this.delay();
-    console.log('[Mock API] resetAgent called');
-    return { success: true, message: 'Agent reset' };
+    return this.request('/api/agent/reset', {
+      method: 'POST',
+    });
   }
 
   /**
-   * 获取 Agent 状态（模拟）
+   * 获取 Agent 状态
    */
   async getAgentState(): Promise<AgentState> {
-    await this.delay();
-    return {
-      objective: '',
-      currentUrl: 'about:blank',
-      currentStep: 0,
-      maxSteps: 15,
-      lastAction: 'Waiting to start...',
-      stepDescription: 'Agent is ready',
-      isDone: false,
-      errorMessage: null,
-      progressRatio: 0,
-      stagnationCount: 0,
-      taskComplexity: 'simple',
-      popupDetected: false,
-      loginFormDetected: false,
-    };
+    return this.request('/api/agent/state');
   }
 
   /**
-   * 获取最新截图（模拟）
+   * 获取最新截图
    */
   async getScreenshot(): Promise<{ screenshot: string; url: string }> {
-    await this.delay();
-    return { screenshot: '', url: 'about:blank' };
+    return this.request('/api/agent/screenshot');
   }
 
   /**
-   * 获取日志（模拟）
+   * 获取日志
    */
-  async getLogs(_limit: number = 50): Promise<LogEntry[]> {
-    await this.delay();
-    return [];
+  async getLogs(limit: number = 50): Promise<LogEntry[]> {
+    return this.request(`/api/agent/logs?limit=${limit}`);
   }
 
   /**
-   * 发送用户输入（模拟）
+   * 发送用户输入
    */
-  async sendUserInput(input: string): Promise<{ success: boolean }> {
-    await this.delay();
-    console.log('[Mock API] sendUserInput called:', input);
-    return { success: true };
+  async sendUserInput(input: string): Promise<{ success: boolean; message: string }> {
+    return this.request('/api/agent/input', {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    });
   }
 
   /**
-   * 获取可用模型列表（模拟）
+   * 获取终端输出
+   */
+  async getTerminalOutput(limit: number = 100): Promise<{
+    lines: Array<{
+      id: string;
+      timestamp: string;
+      type: string;
+      content: string;
+    }>;
+    total: number;
+    waitingForInput: boolean;
+    inputPrompt: string;
+  }> {
+    return this.request(`/api/terminal/output?limit=${limit}`);
+  }
+
+  /**
+   * 清空终端
+   */
+  async clearTerminal(): Promise<{ success: boolean; message: string }> {
+    return this.request('/api/terminal/clear', {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * 获取可用模型列表
    */
   async getAvailableModels(): Promise<{ id: string; name: string; description: string }[]> {
-    await this.delay();
-    return [
-      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', description: 'Fast and efficient model' },
-      { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro', description: 'Advanced reasoning model' },
-    ];
+    return this.request('/api/models');
   }
 
   /**
-   * 健康检查（模拟）
+   * 健康检查
    */
-  async healthCheck(): Promise<{ status: string; version: string }> {
-    await this.delay();
-    return { status: 'healthy', version: '1.0.0-mock' };
+  async healthCheck(): Promise<{ status: string; version: string; agent_status: string }> {
+    return this.request('/api/health');
+  }
+
+  /**
+   * 执行 python main.py 命令
+   */
+  async executeCommand(
+    objective: string = '',
+    url: string = '',
+    maxSteps: number = 30,
+    model: string = 'gemini-3-flash-preview'
+  ): Promise<{ success: boolean; message: string; command?: string }> {
+    return this.request('/api/command/execute', {
+      method: 'POST',
+      body: JSON.stringify({
+        objective,
+        url,
+        max_steps: maxSteps,
+        model,
+      }),
+    });
+  }
+
+  /**
+   * 停止命令执行
+   */
+  async stopCommand(): Promise<{ success: boolean; message: string }> {
+    return this.request('/api/command/stop', {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * 获取命令状态
+   */
+  async getCommandStatus(): Promise<{
+    status: string;
+    exit_code: number | null;
+    output_count: number;
+    duration: number;
+    output: string[];
+  }> {
+    return this.request('/api/command/status');
+  }
+
+  /**
+   * 获取命令输出
+   */
+  async getCommandOutput(limit: number = 100): Promise<{
+    output: string[];
+    total_lines: number;
+  }> {
+    return this.request(`/api/command/output?limit=${limit}`);
+  }
+
+  /**
+   * 获取日志文件列表
+   */
+  async getLogFiles(): Promise<{ files: FileInfo[] }> {
+    return this.request('/api/files/logs');
+  }
+
+  /**
+   * 获取过程文件列表
+   */
+  async getProcessFiles(): Promise<{ groups: TaskGroup[] }> {
+    return this.request('/api/files/process');
+  }
+
+  /**
+   * 获取所有文件（日志和过程文件）
+   */
+  async getAllFiles(): Promise<{ groups: TaskGroup[] }> {
+    return this.request('/api/files/all');
+  }
+
+  /**
+   * 获取文件内容
+   */
+  async getFileContent(filePath: string): Promise<FileContentResponse> {
+    const encodedPath = encodeURIComponent(filePath);
+    return this.request(`/api/files/content?file_path=${encodedPath}`);
   }
 }
 
 /**
- * 模拟 WebSocket 客户端类
+ * WebSocket 客户端类
  *
  * 【功能说明】
- * 模拟 WebSocket 连接，通过定时器推送模拟消息
+ * 管理与后端的 WebSocket 连接，接收实时消息
  */
 class WebSocketClient {
-  // url 保留用于将来可能的扩展
-  private _url: string;
+  private url: string;
+  private ws: WebSocket | null = null;
   private messageHandlers: Map<string, ((data: unknown) => void)[]> = new Map();
-  private intervalId: number | null = null;
   private isConnected: boolean = false;
-  private mockState: {
-    status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
-    currentStep: number;
-    maxSteps: number;
-    objective: string;
-    currentUrl: string;
-  } = {
-    status: 'idle',
-    currentStep: 0,
-    maxSteps: 15,
-    objective: '',
-    currentUrl: 'about:blank',
-  };
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 5;
+  private reconnectDelay: number = 1000;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(url: string) {
-    this._url = url;
+    this.url = url;
   }
 
   /**
-   * 连接 WebSocket（模拟）
+   * 连接 WebSocket
    */
   connect(): void {
-    console.log('[Mock WebSocket] Connecting...');
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      console.log('[WebSocket] Already connected or connecting');
+      return;
+    }
+
+    console.log('[WebSocket] Connecting to', this.url);
     
-    // 模拟连接成功
-    setTimeout(() => {
-      this.isConnected = true;
-      console.log('[Mock WebSocket] Connected');
-      this.emit('connected', {});
-    }, 100);
+    try {
+      this.ws = new WebSocket(this.url);
+      
+      this.ws.onopen = () => {
+        console.log('[WebSocket] Connected');
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        this.emit('connected', {});
+        this.emit('connection_status', { connected: true });
+      };
+      
+      this.ws.onclose = (event) => {
+        console.log('[WebSocket] Disconnected', event.code, event.reason);
+        this.isConnected = false;
+        this.emit('disconnected', { code: event.code, reason: event.reason });
+        this.emit('connection_status', { connected: false });
+        
+        // 自动重连
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.scheduleReconnect();
+        }
+      };
+      
+      this.ws.onerror = (error) => {
+        console.error('[WebSocket] Error:', error);
+        this.emit('error', { message: 'WebSocket connection error' });
+      };
+      
+      this.ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          this.handleMessage(message);
+        } catch (error) {
+          console.error('[WebSocket] Failed to parse message:', error);
+        }
+      };
+    } catch (error) {
+      console.error('[WebSocket] Failed to create connection:', error);
+      this.scheduleReconnect();
+    }
+  }
+
+  /**
+   * 安排重连
+   */
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    
+    console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    
+    this.reconnectTimer = setTimeout(() => {
+      this.connect();
+    }, delay);
   }
 
   /**
    * 断开连接
    */
   disconnect(): void {
-    this.isConnected = false;
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
-    console.log('[Mock WebSocket] Disconnected');
+    
+    if (this.ws) {
+      this.ws.close(1000, 'Client disconnect');
+      this.ws = null;
+    }
+    
+    this.isConnected = false;
+    console.log('[WebSocket] Disconnected by client');
   }
 
   /**
-   * 发送消息（模拟）
+   * 处理接收到的消息
    */
-  send(type: string, payload: unknown): void {
-    console.log('[Mock WebSocket] Send:', { type, payload });
+  private handleMessage(message: { type: string; payload?: unknown }): void {
+    const { type, payload } = message;
     
-    // 处理特定消息类型
-    if (type === 'ping') {
-      this.emit('pong', {});
+    // 触发对应类型的处理器
+    this.emit(type, payload);
+    
+    // 同时触发通用消息事件
+    this.emit('message', message);
+  }
+
+  /**
+   * 发送消息
+   */
+  send(type: string, payload: unknown = {}): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('[WebSocket] Cannot send: not connected');
+      return;
     }
+    
+    const message = JSON.stringify({ type, payload });
+    this.ws.send(message);
   }
 
   /**
@@ -233,6 +418,7 @@ class WebSocketClient {
     }
     this.messageHandlers.get(event)!.push(handler as (data: unknown) => void);
 
+    // 返回取消订阅函数
     return () => {
       const handlers = this.messageHandlers.get(event);
       if (handlers) {
@@ -250,7 +436,13 @@ class WebSocketClient {
   private emit(event: string, data: unknown): void {
     const handlers = this.messageHandlers.get(event);
     if (handlers) {
-      handlers.forEach(handler => handler(data));
+      handlers.forEach(handler => {
+        try {
+          handler(data);
+        } catch (error) {
+          console.error(`[WebSocket] Handler error for event "${event}":`, error);
+        }
+      });
     }
   }
 
@@ -258,178 +450,22 @@ class WebSocketClient {
    * 检查连接状态
    */
   checkIsConnected(): boolean {
-    return this.isConnected;
+    return this.isConnected && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
   /**
-   * 开始模拟 Agent 运行
+   * 获取连接详情
    */
-  startMockAgent(objective: string): void {
-    this.mockState.status = 'running';
-    this.mockState.objective = objective;
-    this.mockState.currentStep = 0;
-    this.mockState.currentUrl = 'https://www.google.com';
-
-    // 发送状态变化
-    this.emit('status_change', { status: 'running' });
-    
-    // 发送初始日志
-    this.emit('log', {
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'success',
-      message: `Agent started: ${objective}`,
-    });
-
-    // 模拟步骤执行
-    this.intervalId = window.setInterval(() => {
-      if (this.mockState.status !== 'running') return;
-      
-      if (this.mockState.currentStep < this.mockState.maxSteps) {
-        this.mockState.currentStep++;
-        
-        // 发送状态更新
-        this.emit('state_update', {
-          objective: this.mockState.objective,
-          currentUrl: this.mockState.currentUrl,
-          currentStep: this.mockState.currentStep,
-          maxSteps: this.mockState.maxSteps,
-          lastAction: `Executing step ${this.mockState.currentStep}`,
-          stepDescription: `Step ${this.mockState.currentStep}: Analyzing page...`,
-          isDone: false,
-          errorMessage: null,
-          progressRatio: this.mockState.currentStep / this.mockState.maxSteps,
-          stagnationCount: 0,
-          taskComplexity: 'simple',
-          popupDetected: false,
-          loginFormDetected: false,
-        });
-
-        // 发送日志
-        this.emit('log', {
-          id: `log-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString(),
-          level: 'info',
-          message: `Step ${this.mockState.currentStep}: Analyzing page elements...`,
-        });
-
-        // 发送模拟截图
-        this.emit('screenshot', {
-          screenshot: this.generateMockScreenshot(),
-          url: this.mockState.currentUrl,
-        });
-      } else {
-        // 完成
-        this.mockState.status = 'completed';
-        this.emit('status_change', { status: 'completed' });
-        this.emit('log', {
-          id: `log-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString(),
-          level: 'success',
-          message: 'Task completed successfully!',
-        });
-        
-        if (this.intervalId) {
-          clearInterval(this.intervalId);
-          this.intervalId = null;
-        }
-      }
-    }, 2000);
-  }
-
-  /**
-   * 暂停模拟 Agent
-   */
-  pauseMockAgent(): void {
-    this.mockState.status = 'paused';
-    this.emit('status_change', { status: 'paused' });
-    this.emit('log', {
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'warning',
-      message: 'Agent paused by user',
-    });
-  }
-
-  /**
-   * 恢复模拟 Agent
-   */
-  resumeMockAgent(): void {
-    this.mockState.status = 'running';
-    this.emit('status_change', { status: 'running' });
-    this.emit('log', {
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'info',
-      message: 'Agent resumed',
-    });
-  }
-
-  /**
-   * 停止模拟 Agent
-   */
-  stopMockAgent(): void {
-    this.mockState.status = 'stopped';
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    this.emit('status_change', { status: 'stopped' });
-    this.emit('log', {
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'warning',
-      message: 'Agent stopped by user',
-    });
-  }
-
-  /**
-   * 重置模拟 Agent
-   */
-  resetMockAgent(): void {
-    this.mockState = {
-      status: 'idle',
-      currentStep: 0,
-      maxSteps: 15,
-      objective: '',
-      currentUrl: 'about:blank',
+  getConnectionInfo(): { connected: boolean; url: string; attempts: number } {
+    return {
+      connected: this.checkIsConnected(),
+      url: this.url,
+      attempts: this.reconnectAttempts,
     };
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    this.emit('status_change', { status: 'idle' });
-    this.emit('log', {
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
-      level: 'info',
-      message: 'Agent reset',
-    });
-  }
-
-  /**
-   * 生成模拟截图（简单的 SVG 图像）
-   */
-  private generateMockScreenshot(): string {
-    const svg = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
-        <rect width="100%" height="100%" fill="#1e293b"/>
-        <text x="50%" y="50%" font-family="Arial" font-size="24" fill="#94a3b8" text-anchor="middle">
-          Mock Browser View - Step ${this.mockState.currentStep}
-        </text>
-        <text x="50%" y="60%" font-family="Arial" font-size="16" fill="#64748b" text-anchor="middle">
-          ${this.mockState.currentUrl}
-        </text>
-      </svg>
-    `;
-    return `data:image/svg+xml;base64,${btoa(svg)}`;
   }
 }
 
-// 创建模拟实例
-const API_BASE_URL = 'http://localhost:8000';
-const WS_BASE_URL = 'ws://localhost:8000/ws';
-
+// 创建并导出实例
 export const apiClient = new ApiClient(API_BASE_URL);
 export const wsClient = new WebSocketClient(WS_BASE_URL);
 

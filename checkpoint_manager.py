@@ -24,6 +24,47 @@ from datetime import datetime
 from pathlib import Path
 
 from config import CHECKPOINT_DIR, CHECKPOINT_INTERVAL
+from security_utils import mask_string, is_sensitive_field, sanitize_log_message
+
+
+def _mask_sensitive_in_state(state: dict) -> dict:
+    """
+    递归脱敏状态字典中的敏感信息
+    
+    【参数】
+    state: 原始状态字典
+    
+    【返回值】
+    脱敏后的字典副本
+    """
+    if not isinstance(state, dict):
+        return state
+    
+    SENSITIVE_KEYS = {"password", "pwd", "passwd", "secret", "token", "api_key", 
+                      "credential", "cookie", "session", "auth"}
+    
+    result = {}
+    for key, value in state.items():
+        key_str = str(key).lower() if key else ""
+        
+        if isinstance(value, str):
+            if is_sensitive_field(str(key)) or any(s in key_str for s in SENSITIVE_KEYS):
+                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            elif len(value) > 20 and any(s in value.lower() for s in ["password", "token", "secret"]):
+                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            else:
+                result[key] = value
+        elif isinstance(value, dict):
+            result[key] = _mask_sensitive_in_state(value)
+        elif isinstance(value, list):
+            result[key] = [
+                _mask_sensitive_in_state(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    
+    return result
 
 
 @dataclass
@@ -121,7 +162,7 @@ class CheckpointManager:
                        user_interaction: dict, storage_state: dict = None,
                        description: str = "") -> str:
         """
-        保存检查点
+        保存检查点（自动脱敏敏感信息）
         
         【参数】
         state: Agent状态
@@ -152,14 +193,17 @@ class CheckpointManager:
             description=description
         )
         
+        masked_state = _mask_sensitive_in_state(state) if state else {}
+        masked_storage_state = _mask_sensitive_in_state(storage_state) if storage_state else {}
+        
         checkpoint_data = CheckpointData(
             metadata=metadata,
-            state=state,
+            state=masked_state,
             step_manager=step_manager,
             completion_evaluator=completion_evaluator,
             termination_manager=termination_manager,
             user_interaction=user_interaction,
-            storage_state=storage_state or {}
+            storage_state=masked_storage_state or {}
         )
         
         checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.json"

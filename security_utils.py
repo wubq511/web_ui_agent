@@ -206,6 +206,9 @@ def mask_dict(
     return result
 
 
+mask_sensitive_in_dict = mask_dict
+
+
 def safe_format(
     template: str,
     data: Dict[str, Any],

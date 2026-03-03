@@ -1,2 +1,0 @@
-[0301/200539.941:ERROR:net\socket\ssl_client_socket_impl.cc:918] handshake failed; returned -1, SSL error code 1, net_error -100
-[0301/200540.199:ERROR:net\socket\ssl_client_socket_impl.cc:918] handshake failed; returned -1, SSL error code 1, net_error -100

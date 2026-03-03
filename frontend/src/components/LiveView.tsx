@@ -37,10 +37,10 @@ const LiveView: React.FC = () => {
    * 订阅 WebSocket 截图消息
    */
   useEffect(() => {
-    // 订阅截图更新（使用泛型指定类型）
-    const unsubscribe = wsClient.on<{ screenshot: string; url: string; timestamp?: string }>(
+    // 订阅截图更新
+    const unsubscribe = wsClient.on(
       'screenshot',
-      (data) => {
+      (data: { screenshot: string; url: string; timestamp?: string }) => {
         if (data.screenshot) {
           setScreenshot(data.screenshot);
           setIsLoading(false);

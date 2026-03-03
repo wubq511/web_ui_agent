@@ -660,6 +660,11 @@ class WebUIAgent:
             for attempt in range(1, max_attempts + 1):
                 try:
                     import msvcrt
+                    import sys
+                    
+                    if not sys.stdin.isatty():
+                        raise Exception("Not a TTY, use input() instead")
+                    
                     if attempt > 1:
                         print(f"\n🔄 请重新输入主密码 (第 {attempt}/{max_attempts} 次): ", end='', flush=True)
                     else:
@@ -1116,6 +1121,16 @@ class WebUIAgent:
                 )
             
             self.context.initialize(objective, start_url or "")
+            
+            # 在任务开始时立即评估并输出复杂度
+            initial_complexity = self.context.completion_evaluator.evaluate_task_complexity(objective)
+            self.context.completion_evaluator.task_complexity = initial_complexity
+            self.context.termination_manager.set_task_complexity(initial_complexity)
+            print(f"📊 任务复杂度更新: {initial_complexity.value}, 停滞阈值: {self.context.termination_manager.adjusted_stagnation_threshold}")
+            
+            # 更新初始状态的复杂度
+            initial_state["task_complexity"] = initial_complexity.value
+            initial_state["adjusted_stagnation_threshold"] = self.context.termination_manager.adjusted_stagnation_threshold
             
             final_state = self.graph.invoke(initial_state)
             

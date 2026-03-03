@@ -5,12 +5,12 @@
  *
  * 【应用概述】
  * Web UI Agent 的控制中心前端应用，提供直观的界面来控制和监控 Agent 的执行。
- * 使用模拟数据，不与后端交互。
+ * 与后端 API 交互，执行真实的 python main.py 命令。
  *
  * 【功能模块】
  * 1. Header: 顶部导航栏，显示 Logo 和 Agent 状态
  * 2. Agent Sandbox: 显示当前步骤和最近动作
- * 3. Live View: 浏览器实时视口，显示 Agent 操作过程（模拟）
+ * 3. Live View: 浏览器实时视口，显示 Agent 操作过程
  * 4. Control Panel: 控制面板，设置任务目标、选择模型、控制执行
  * 5. Log Panel: 日志面板，显示执行日志
  * ================================================================================
@@ -21,19 +21,29 @@ import Header from './components/Header';
 import AgentSandbox from './components/AgentSandbox';
 import LiveView from './components/LiveView';
 import ControlPanel from './components/ControlPanel';
-import LogPanel from './components/LogPanel';
+import FilePanel from './components/FilePanel';
+import InteractiveTerminal from './components/InteractiveTerminal';
 import { AgentProvider } from './store/agentStore';
-import { ControlProvider } from './store/controlStore';
+import { ControlProvider, useControl } from './store/controlStore';
 import { LogProvider } from './store/logStore';
+import { TerminalProvider } from './store/terminalStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import './App.css';
 
 /**
  * 主内容组件
+ * 
+ * 【布局说明】
+ * - 非运行状态：右列显示 ControlPanel + FilePanel
+ * - 运行/暂停状态：右列显示 ControlPanel（精简模式）+ 扩展的 InteractiveTerminal
+ * - 通过 isRunning 状态实现区域动态切换
  */
 const MainContent: React.FC = () => {
-  // 初始化模拟 WebSocket 连接
-  useWebSocket();
+  const { isConnected } = useWebSocket();
+  const { state: controlState } = useControl();
+  
+  // 判断是否处于运行状态（运行中或暂停）
+  const isRunning = controlState.status === 'running' || controlState.status === 'paused';
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800">
@@ -74,30 +84,48 @@ const MainContent: React.FC = () => {
           </div>
         </div>
 
-        {/* 右列：Control Panel + Log (占 1/3 宽度) */}
+        {/* 右列：根据运行状态动态切换布局 */}
         <div className="flex-1 flex flex-col gap-4 min-w-0 max-w-md">
           {/* Control Panel - 控制面板 */}
           <ControlPanel />
 
-          {/* Log Panel - 日志面板 */}
-          <div className="flex-1 min-h-0">
-            <LogPanel />
+          {/* 动态区域：使用 CSS 控制显示/隐藏，避免组件卸载重挂载 */}
+          <div className="flex-1 min-h-0 relative">
+            {/* 文件面板 - 非运行状态显示 */}
+            <div 
+              className={`absolute inset-0 transition-opacity duration-200 ease-out ${
+                isRunning ? 'opacity-0 pointer-events-none' : 'opacity-100'
+              }`}
+            >
+              <FilePanel />
+            </div>
+            
+            {/* 终端面板 - 运行状态显示 */}
+            <div 
+              className={`absolute inset-0 transition-opacity duration-200 ease-out ${
+                isRunning ? 'opacity-100' : 'opacity-0 pointer-events-none'
+              }`}
+            >
+              <div className="glass rounded-xl border border-white/10 h-full overflow-hidden">
+                <InteractiveTerminal />
+              </div>
+            </div>
           </div>
         </div>
       </main>
 
       {/* 底部状态栏 */}
       <footer className="glass-strong h-8 px-4 flex items-center justify-between border-t border-white/5">
-        {/* 左侧：版本信息 */}
+        {/* 左侧：连接状态 */}
         <div className="flex items-center gap-4 text-[10px] text-slate-500">
-          <span>Web UI Agent v0.8.2</span>
-          <span className="w-px h-3 bg-white/10" />
-          <span className="text-yellow-400">Mock Mode</span>
+          <span className={isConnected ? 'text-green-400' : 'text-red-400'}>
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
         </div>
         {/* 右侧：连接状态 */}
         <div className="flex items-center gap-4 text-[10px] text-slate-500">
-          <span>Mock Connection</span>
-          <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
+          <span>Backend: localhost:8000</span>
+          <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
         </div>
       </footer>
     </div>
@@ -112,7 +140,9 @@ function App() {
     <AgentProvider>
       <ControlProvider>
         <LogProvider>
-          <MainContent />
+          <TerminalProvider>
+            <MainContent />
+          </TerminalProvider>
         </LogProvider>
       </ControlProvider>
     </AgentProvider>

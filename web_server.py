@@ -3,11 +3,15 @@
 Web UI Agent Web服务器
 提供HTTP API和WebSocket服务供前端调用
 实现真实的浏览器控制和高频截图流
+支持执行 python main.py 命令
 ================================================================================
 """
 
 import asyncio
 import sys
+import subprocess
+import os
+import re
 
 # Windows 平台需要使用 ProactorEventLoop 来支持子进程
 if sys.platform == 'win32':
@@ -84,6 +88,7 @@ class AgentStateManager:
         self.selected_model: str = DEFAULT_MODEL
         self.current_step: int = 0
         self.max_steps: int = 15
+        self.progress_ratio: float = 0.0  # 基于多维度评估的进度
         self.last_action: str = "Waiting to start..."
         self.step_description: str = "Agent is ready"
         self.current_url: str = ""
@@ -92,6 +97,7 @@ class AgentStateManager:
         self.task_complexity: str = "simple"
         self.popup_detected: bool = False
         self.login_form_detected: bool = False
+        self.credential_manager_logged_in: bool = False  # 凭证管理器登录状态
         
         # 浏览器相关
         self.browser: Optional[Browser] = None
@@ -104,6 +110,20 @@ class AgentStateManager:
         self.screenshot_interval: float = 0.033  # 33ms = 30fps
         self.latest_screenshot: Optional[str] = None
         self.is_capturing: bool = False
+        
+        # 命令执行相关
+        self.command_process: Optional[asyncio.subprocess.Process] = None
+        self.command_output: List[str] = []
+        self.command_status: str = "idle"  # idle, running, completed, error
+        self.command_exit_code: Optional[int] = None
+        self.command_start_time: Optional[float] = None
+        
+        # 交互式终端相关
+        self.waiting_for_input: bool = False  # 是否等待用户输入
+        self.input_prompt: str = ""  # 输入提示信息
+        self.input_queue: asyncio.Queue = asyncio.Queue()  # 用户输入队列
+        self.terminal_lines: List[Dict] = []  # 终端输出行（带类型标记）
+        self._current_input_is_password: bool = False  # 当前输入是否是密码
     
     def add_log(self, message: str, level: str = "info", details: str = None):
         """
@@ -189,12 +209,113 @@ class AgentStateManager:
             "stepDescription": self.step_description,
             "isDone": self.status == "completed",
             "errorMessage": None if self.status != "error" else "An error occurred",
-            "progressRatio": self.current_step / self.max_steps if self.max_steps > 0 else 0,
+            "progressRatio": self.progress_ratio,  # 使用多维度评估的进度
             "stagnationCount": 0,
             "taskComplexity": self.task_complexity,
             "popupDetected": self.popup_detected,
-            "loginFormDetected": self.login_form_detected
+            "loginFormDetected": self.login_form_detected,
+            "waitingForInput": self.waiting_for_input,
+            "inputPrompt": self.input_prompt,
+            "terminalLines": self.terminal_lines[-100:] if self.terminal_lines else [],
+            "credentialManagerLoggedIn": self.credential_manager_logged_in,
         }
+    
+    async def add_terminal_line(self, line: str, line_type: str = "output"):
+        """
+        添加终端输出行并广播
+        
+        Args:
+            line: 输出行内容
+            line_type: 行类型 (output, error, input, prompt, system)
+        """
+        line_entry = {
+            "id": f"{datetime.now().timestamp()}-{len(self.terminal_lines)}",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "type": line_type,
+            "content": line
+        }
+        self.terminal_lines.append(line_entry)
+        if len(self.terminal_lines) > 500:
+            self.terminal_lines = self.terminal_lines[-500:]
+        
+        await self.broadcast({
+            "type": "terminal_line",
+            "payload": line_entry
+        })
+    
+    async def set_waiting_for_input(self, prompt: str = ""):
+        """
+        设置等待用户输入状态
+        
+        Args:
+            prompt: 输入提示信息
+        """
+        self.waiting_for_input = True
+        self.input_prompt = prompt
+        
+        if prompt:
+            await self.add_terminal_line(prompt, "prompt")
+        
+        await self.broadcast({
+            "type": "input_required",
+            "payload": {
+                "waiting": True,
+                "prompt": prompt
+            }
+        })
+    
+    async def submit_user_input(self, user_input: str, is_password: bool = False):
+        """
+        提交用户输入
+        
+        Args:
+            user_input: 用户输入的内容
+            is_password: 是否是密码输入
+        """
+        if not self.waiting_for_input:
+            return False
+        
+        if is_password:
+            display_text = "> " + "*" * min(len(user_input), 8)
+        else:
+            display_text = f"> {user_input}"
+        await self.add_terminal_line(display_text, "input")
+        
+        await self.input_queue.put(user_input)
+        
+        self.waiting_for_input = False
+        self.input_prompt = ""
+        
+        await self.broadcast({
+            "type": "input_required",
+            "payload": {
+                "waiting": False,
+                "prompt": ""
+            }
+        })
+        
+        return True
+    
+    async def get_user_input(self, prompt: str = "") -> str:
+        """
+        等待并获取用户输入
+        
+        Args:
+            prompt: 输入提示信息
+            
+        Returns:
+            用户输入的内容
+        """
+        await self.set_waiting_for_input(prompt)
+        
+        user_input = await self.input_queue.get()
+        return user_input
+    
+    def clear_terminal(self):
+        """清空终端输出"""
+        self.terminal_lines = []
+        self.waiting_for_input = False
+        self.input_prompt = ""
     
     async def launch_browser(self) -> bool:
         """
@@ -403,6 +524,477 @@ class AgentStateManager:
                 self.add_log(f"Failed to press key: {str(e)}", "error")
                 return False
         return False
+    
+    async def execute_main_py(self, objective: str = None, url: str = None, 
+                               max_steps: int = None, model: str = None) -> bool:
+        """
+        执行 python main.py 命令
+        
+        【安全措施】
+        1. 只允许执行 python main.py，不接受任意命令
+        2. 参数经过严格验证和转义
+        3. 使用 subprocess 安全执行
+        
+        Args:
+            objective: 任务目标
+            url: 起始 URL
+            max_steps: 最大步骤数
+            model: 使用的模型
+            
+        Returns:
+            启动成功返回 True
+        """
+        if self.command_status == "running":
+            self.add_log("Command already running", "warning")
+            return False
+        
+        self.command_status = "running"
+        self.command_output = []
+        self.command_exit_code = None
+        self.command_start_time = datetime.now().timestamp()
+        self.clear_terminal()
+        
+        cmd = ["python", "main.py"]
+        
+        if objective:
+            sanitized_objective = self._sanitize_arg(objective)
+            cmd.extend(["-o", sanitized_objective])
+        if url:
+            sanitized_url = self._sanitize_url(url)
+            cmd.extend(["-u", sanitized_url])
+        if max_steps:
+            try:
+                steps = int(max_steps)
+                if 1 <= steps <= 100:
+                    cmd.extend(["-m", str(steps)])
+                    self.max_steps = steps  # 更新后端的 max_steps
+            except ValueError:
+                pass
+        else:
+            # 使用 main.py 的默认值
+            self.max_steps = 30
+        if model and model in AVAILABLE_MODELS:
+            cmd.extend(["--model", model])
+        
+        self.add_log("Starting python main.py...", "info")
+        await self.add_terminal_line(f"$ {' '.join(cmd)}", "system")
+        
+        try:
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            self.command_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=project_dir,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"}
+            )
+            
+            asyncio.create_task(self._read_command_output())
+            
+            self.add_log(f"Command started: {' '.join(cmd)}", "success")
+            await self.broadcast_command_status()
+            return True
+            
+        except Exception as e:
+            self.command_status = "error"
+            self.command_exit_code = -1
+            self.add_log(f"Failed to start command: {str(e)}", "error")
+            await self.broadcast_command_status()
+            return False
+    
+    def _sanitize_arg(self, arg: str) -> str:
+        """
+        清理参数，防止命令注入
+        
+        移除或转义危险字符
+        """
+        if not arg:
+            return ""
+        dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r']
+        result = arg
+        for char in dangerous_chars:
+            result = result.replace(char, '')
+        return result.strip()
+    
+    def _sanitize_url(self, url: str) -> str:
+        """
+        清理 URL 参数
+        
+        只允许 http/https 协议
+        """
+        if not url:
+            return ""
+        url = url.strip()
+        if not url.startswith(('http://', 'https://')):
+            return ""
+        return self._sanitize_arg(url)
+    
+    async def _read_command_output(self):
+        """
+        异步读取命令输出并广播
+        
+        【交互式终端支持】
+        1. 检测需要用户输入的提示（如密码输入、确认等）
+        2. 等待前端用户输入
+        3. 将用户输入传递给子进程
+        
+        【重要改进】
+        使用行读取 + 超时机制，处理没有换行符的提示（如 "主密码: "）
+        """
+        if not self.command_process:
+            return
+        
+        input_prompt_patterns = [
+            "主密码:", "密码:", "password:", "Password:", 
+            "username:", "用户名:", "请输入", "按 Enter", 
+            "跳过", "[y/n]", "(y/n)", "登录后", "自动填充"
+        ]
+        
+        try:
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        self.command_process.stdout.readline(),
+                        timeout=0.5
+                    )
+                    
+                    if not line:
+                        break
+                    
+                    try:
+                        line_text = line.decode('utf-8', errors='replace').rstrip()
+                    except:
+                        line_text = line.decode('gbk', errors='replace').rstrip()
+                    
+                    if line_text:
+                        self.command_output.append(line_text)
+                        if len(self.command_output) > 500:
+                            self.command_output = self.command_output[-500:]
+                        
+                        line_type = self._detect_line_type(line_text)
+                        await self.add_terminal_line(line_text, line_type)
+                        
+                        await self.broadcast({
+                            "type": "command_output",
+                            "payload": {
+                                "line": line_text,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        })
+                        
+                        self._parse_output_for_status(line_text)
+                        
+                        # 检查步骤是否更新，如果更新则广播状态
+                        step_match = re.search(r'步骤\s*(\d+)', line_text)
+                        if step_match:
+                            new_step = int(step_match.group(1))
+                            if new_step != self.current_step:
+                                self.current_step = new_step
+                                print(f"[WebSocket] Step updated to {new_step}, broadcasting state (progressRatio: {self.current_step / self.max_steps:.2%})")
+                                await self.broadcast_state()
+                        
+                        # 解析最大步骤数
+                        max_steps_match = re.search(r'最大步骤:\s*(\d+)', line_text)
+                        if max_steps_match:
+                            self.max_steps = int(max_steps_match.group(1))
+                            print(f"[WebSocket] Max steps updated to {self.max_steps}")
+                        
+                        # 解析进度信息（基于多维度评估的准确进度）
+                        # 格式: "📊 进度: 45% | 停滞: 2/8" (可能包含 ANSI 颜色代码)
+                        # 去除 ANSI 颜色代码后再匹配
+                        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line_text)
+                        progress_match = re.search(r'📊 进度:\s*(\d+)%', clean_line)
+                        if progress_match:
+                            new_progress = int(progress_match.group(1)) / 100
+                            if new_progress != self.progress_ratio:
+                                self.progress_ratio = new_progress
+                                print(f"[WebSocket] Progress updated to {new_progress:.0%}")
+                                await self.broadcast_state()
+                        
+                        # 解析凭证管理器登录状态
+                        if "✅ 凭证管理器登录成功" in line_text:
+                            self.credential_manager_logged_in = True
+                            print(f"[WebSocket] Credential manager logged in, broadcasting state update")
+                            await self.broadcast_state()
+                        
+                        # 解析任务复杂度更新（在异步上下文中处理）
+                        complexity_match = re.search(r'任务复杂度更新:\s*(simple|medium|complex|very_complex)', line_text)
+                        if complexity_match:
+                            new_complexity = complexity_match.group(1)
+                            if new_complexity != self.task_complexity:
+                                self.task_complexity = new_complexity
+                                await self._broadcast_complexity_update(new_complexity)
+                        
+                        if self._is_input_required(line_text):
+                            await self._handle_input_request(line_text)
+                    
+                except asyncio.TimeoutError:
+                    if self.command_process.stdout.at_eof():
+                        break
+                    
+                    try:
+                        chunk = await self.command_process.stdout.read(1024)
+                        if chunk:
+                            try:
+                                chunk_text = chunk.decode('utf-8', errors='replace')
+                            except:
+                                chunk_text = chunk.decode('gbk', errors='replace')
+                            
+                            chunk_stripped = chunk_text.rstrip()
+                            if chunk_stripped:
+                                self.command_output.append(chunk_stripped)
+                                if len(self.command_output) > 500:
+                                    self.command_output = self.command_output[-500:]
+                                
+                                line_type = self._detect_line_type(chunk_stripped)
+                                await self.add_terminal_line(chunk_stripped, line_type)
+                                
+                                await self.broadcast({
+                                    "type": "command_output",
+                                    "payload": {
+                                        "line": chunk_stripped,
+                                        "timestamp": datetime.now().isoformat()
+                                    }
+                                })
+                                
+                                # 解析进度信息（在 Timeout 分支中也处理）
+                                clean_chunk = re.sub(r'\x1b\[[0-9;]*m', '', chunk_stripped)
+                                progress_match = re.search(r'📊 进度:\s*(\d+)%', clean_chunk)
+                                if progress_match:
+                                    new_progress = int(progress_match.group(1)) / 100
+                                    if new_progress != self.progress_ratio:
+                                        self.progress_ratio = new_progress
+                                        print(f"[WebSocket] Progress updated to {new_progress:.0%}")
+                                        await self.broadcast_state()
+                                
+                                # 解析凭证管理器登录状态（在 Timeout 分支中也处理）
+                                if "✅ 凭证管理器登录成功" in chunk_stripped:
+                                    self.credential_manager_logged_in = True
+                                    print(f"[WebSocket] Credential manager logged in")
+                                    await self.broadcast_state()
+                                
+                                # 解析任务复杂度更新（在异步上下文中处理）
+                                complexity_match = re.search(r'任务复杂度更新:\s*(simple|medium|complex|very_complex)', chunk_stripped)
+                                if complexity_match:
+                                    new_complexity = complexity_match.group(1)
+                                    if new_complexity != self.task_complexity:
+                                        self.task_complexity = new_complexity
+                                        await self._broadcast_complexity_update(new_complexity)
+                                
+                                if self._is_input_required(chunk_stripped):
+                                    await self._handle_input_request(chunk_stripped)
+                    except:
+                        pass
+            
+            await self.command_process.wait()
+            self.command_exit_code = self.command_process.returncode
+            self.command_status = "completed" if self.command_exit_code == 0 else "error"
+            
+            # 任务结束时重置状态
+            self.credential_manager_logged_in = False
+            self.progress_ratio = 0.0
+            
+            await self.add_terminal_line(
+                f"[Process finished with exit code: {self.command_exit_code}]",
+                "system"
+            )
+            self.add_log(
+                f"Command finished with exit code: {self.command_exit_code}",
+                "success" if self.command_exit_code == 0 else "error"
+            )
+            await self.broadcast_command_status()
+            await self.broadcast_state()
+            
+        except asyncio.CancelledError:
+            await self.add_terminal_line("[Process terminated by user]", "system")
+        except Exception as e:
+            self.command_status = "error"
+            self.add_log(f"Error reading output: {str(e)}", "error")
+            await self.broadcast_command_status()
+    
+    def _detect_line_type(self, line: str) -> str:
+        """
+        检测输出行的类型
+        
+        Args:
+            line: 输出行内容
+            
+        Returns:
+            行类型: output, error, warning, info, prompt
+        """
+        line_lower = line.lower()
+        
+        if any(kw in line_lower for kw in ['error', '错误', 'failed', 'exception']):
+            return "error"
+        elif any(kw in line_lower for kw in ['warning', '警告', 'warn']):
+            return "warning"
+        elif any(kw in line_lower for kw in ['success', '成功', 'completed', '完成']):
+            return "success"
+        elif any(kw in line_lower for kw in ['password', '密码', 'input', 'enter', '请输入']):
+            return "prompt"
+        else:
+            return "output"
+    
+    def _is_input_required(self, line: str) -> bool:
+        """
+        检测是否需要用户输入
+        
+        【重要】需要区分真正的输入提示和提示信息
+        
+        Args:
+            line: 输出行内容
+            
+        Returns:
+            是否需要用户输入
+        """
+        line_stripped = line.strip()
+        line_lower = line_stripped.lower()
+        
+        skip_patterns = [
+            r"输入.*命令",          # "输入 'help' 查看可用命令"
+            r"输入.*help",          # "输入 help"
+            r"直接输入",            # "直接输入命令后"
+            r"查看可用",            # "查看可用命令"
+            r"即可执行",            # "即可执行"
+            r"用户交互已启用",       # 提示信息
+            r"提示:",               # 提示信息
+        ]
+        
+        for pattern in skip_patterns:
+            if re.search(pattern, line_stripped, re.IGNORECASE):
+                return False
+        
+        input_patterns = [
+            r'主密码\s*[:：]',         # 主密码: 或 主密码：
+            r'密码\s*[:：]\s*$',       # 密码: (行尾)
+            r'password\s*[:：]\s*$',   # Password:
+            r'username\s*[:：]\s*$',   # Username:
+            r'用户名\s*[:：]\s*$',     # 用户名：
+            r'请输入\s*[:：]?\s*$',    # 请输入: (行尾)
+            r'\[y/n\]',               # [y/n]
+            r'\(y/n\)',               # (y/n)
+            r'continue\?\s*$',        # continue?
+            r'登录后.*跳过',           # 登录后...跳过
+            r'按\s*enter\s*跳过',      # 按 Enter 跳过
+        ]
+        
+        for pattern in input_patterns:
+            if re.search(pattern, line_stripped, re.IGNORECASE):
+                return True
+        return False
+    
+    async def _handle_input_request(self, prompt_line: str):
+        """
+        处理输入请求
+        
+        【重要】此方法会阻塞输出读取循环，直到用户提交输入
+        这是必要的，因为子进程在等待 stdin 输入
+        
+        Args:
+            prompt_line: 包含输入提示的行
+        """
+        self._current_input_is_password = any(kw in prompt_line.lower() for kw in ['password', '密码', '主密码'])
+        
+        prompt_message = "Waiting for your input"
+        if self._current_input_is_password:
+            prompt_message = "Password input (hidden)"
+        elif 'username' in prompt_line.lower() or '用户名' in prompt_line:
+            prompt_message = "Please enter your username"
+        elif '[y/n]' in prompt_line.lower() or '(y/n)' in prompt_line.lower():
+            prompt_message = "Please enter Y or N"
+        elif '按' in prompt_line and 'enter' in prompt_line.lower():
+            prompt_message = "Press Enter to continue or type input"
+        
+        await self.set_waiting_for_input(prompt_message)
+        
+        user_input = await self.input_queue.get()
+        
+        if self.command_process and self.command_process.stdin:
+            try:
+                self.command_process.stdin.write((user_input + '\n').encode('utf-8'))
+                await self.command_process.stdin.drain()
+            except Exception as e:
+                self.add_log(f"Failed to write to stdin: {str(e)}", "error")
+    
+    def _parse_output_for_status(self, line: str):
+        """
+        解析输出以更新 Agent 状态
+        
+        从 main.py 的输出中提取状态信息
+        """
+        if '正在启动浏览器' in line or 'Launching browser' in line.lower():
+            self.status = "running"
+            self.last_action = "Launching browser"
+        elif '导航到' in line or 'Navigating to' in line.lower():
+            self.last_action = "Navigating..."
+        elif '点击' in line or 'Click' in line.lower():
+            self.last_action = "Clicking element"
+        elif '输入' in line or 'Typing' in line.lower():
+            self.last_action = "Typing text"
+        elif '完成' in line or 'completed' in line.lower():
+            self.status = "completed"
+            self.last_action = "Task completed"
+        elif '错误' in line or 'error' in line.lower():
+            self.status = "error"
+    
+    async def _broadcast_complexity_update(self, complexity: str):
+        """
+        广播任务复杂度更新
+        
+        【参数】
+        complexity: 新的复杂度值 (simple/medium/complex/very_complex)
+        """
+        print(f"[WebSocket] Broadcasting complexity update: {complexity}")
+        await self.broadcast({
+            "type": "complexity_update",
+            "payload": {
+                "taskComplexity": complexity,
+                "timestamp": datetime.now().isoformat()
+            }
+        })
+        # 同时更新状态
+        await self.broadcast_state()
+    
+    async def stop_command(self) -> bool:
+        """
+        停止正在执行的命令
+        """
+        if self.command_process and self.command_status == "running":
+            try:
+                self.command_process.terminate()
+                try:
+                    await asyncio.wait_for(self.command_process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.command_process.kill()
+                
+                self.command_status = "stopped"
+                self.credential_manager_logged_in = False
+                self.progress_ratio = 0.0
+                self.add_log("Command stopped by user", "warning")
+                await self.broadcast_command_status()
+                await self.broadcast_state()
+                return True
+            except Exception as e:
+                self.add_log(f"Failed to stop command: {str(e)}", "error")
+                return False
+        return False
+    
+    async def broadcast_command_status(self):
+        """
+        广播命令执行状态
+        """
+        await self.broadcast({
+            "type": "command_status",
+            "payload": {
+                "status": self.command_status,
+                "exit_code": self.command_exit_code,
+                "output_count": len(self.command_output),
+                "start_time": self.command_start_time,
+                "duration": datetime.now().timestamp() - self.command_start_time if self.command_start_time else 0
+            }
+        })
 
 
 # 创建全局状态实例
@@ -755,9 +1347,579 @@ async def get_logs(limit: int = 50):
 
 @app.post("/api/agent/input")
 async def send_user_input(request: UserInputRequest):
-    """发送用户输入"""
-    agent_state.add_log(f"User input received: {request.input}", "info")
-    return {"success": True}
+    """
+    发送用户输入到交互式终端
+    
+    【功能说明】
+    当 Agent 等待用户输入时，通过此 API 提交输入内容
+    输入会被放入队列，由 _handle_input_request 处理
+    """
+    if not agent_state.waiting_for_input:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Agent is not waiting for input"}
+        )
+    
+    is_password = agent_state._current_input_is_password
+    success = await agent_state.submit_user_input(request.input, is_password)
+    
+    if success:
+        agent_state.add_log(f"User input submitted", "info")
+        return {"success": True, "message": "Input submitted"}
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Failed to submit input"}
+        )
+
+
+@app.get("/api/terminal/output")
+async def get_terminal_output(limit: int = 100):
+    """获取终端输出"""
+    return {
+        "lines": agent_state.terminal_lines[-limit:] if agent_state.terminal_lines else [],
+        "total": len(agent_state.terminal_lines),
+        "waitingForInput": agent_state.waiting_for_input,
+        "inputPrompt": agent_state.input_prompt
+    }
+
+
+@app.post("/api/terminal/clear")
+async def clear_terminal():
+    """清空终端输出"""
+    agent_state.clear_terminal()
+    await agent_state.broadcast({
+        "type": "terminal_cleared",
+        "payload": {}
+    })
+    return {"success": True, "message": "Terminal cleared"}
+
+
+# ================================================================================
+# 命令执行 API
+# ================================================================================
+
+class ExecuteCommandRequest(BaseModel):
+    """执行命令请求模型"""
+    objective: str = ""
+    url: str = ""
+    max_steps: int = 30
+    model: str = DEFAULT_MODEL
+
+
+@app.post("/api/command/execute")
+async def execute_command(request: ExecuteCommandRequest):
+    """
+    执行 python main.py 命令
+    
+    【安全说明】
+    此 API 只允许执行预定义的 python main.py 命令，
+    参数经过严格验证，不接受任意命令。
+    """
+    try:
+        if agent_state.command_status == "running":
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "A command is already running"}
+            )
+        
+        success = await agent_state.execute_main_py(
+            objective=request.objective if request.objective else None,
+            url=request.url if request.url else None,
+            max_steps=request.max_steps,
+            model=request.model if request.model != DEFAULT_MODEL else None
+        )
+        
+        if success:
+            return {
+                "success": True, 
+                "message": "Command started successfully",
+                "command": "python main.py"
+            }
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": "Failed to start command"}
+            )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/command/stop")
+async def stop_command():
+    """停止正在执行的命令"""
+    if agent_state.command_status != "running":
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "No command is running"}
+        )
+    
+    success = await agent_state.stop_command()
+    return {"success": success, "message": "Command stopped" if success else "Failed to stop command"}
+
+
+@app.get("/api/command/status")
+async def get_command_status():
+    """获取命令执行状态"""
+    return {
+        "status": agent_state.command_status,
+        "exit_code": agent_state.command_exit_code,
+        "output_count": len(agent_state.command_output),
+        "start_time": agent_state.command_start_time,
+        "duration": datetime.now().timestamp() - agent_state.command_start_time if agent_state.command_start_time else 0,
+        "output": agent_state.command_output[-50:] if agent_state.command_output else []
+    }
+
+
+@app.get("/api/command/output")
+async def get_command_output(limit: int = 100):
+    """获取命令输出"""
+    return {
+        "output": agent_state.command_output[-limit:] if agent_state.command_output else [],
+        "total_lines": len(agent_state.command_output)
+    }
+
+
+# ================================================================================
+# 文件管理 API - 用于日志和过程文件查看
+# ================================================================================
+
+# 基础路径配置
+LOGS_DIR = Path("d:/MyCode/CODE_C/C_Multiple/web_ui_agent/logs")
+PROCESS_DIR = Path("d:/MyCode/CODE_C/C_Multiple/web_ui_agent/process")
+PERFORMANCE_DIR = Path("d:/MyCode/CODE_C/C_Multiple/web_ui_agent/logs/performance")
+
+
+class FileInfo(BaseModel):
+    """文件信息模型"""
+    name: str
+    path: str
+    type: str  # 'log', 'session', 'performance', 'process'
+    size: int
+    modified: str
+    task_id: Optional[str] = None  # 任务ID（用于分组）
+
+
+class TaskGroup(BaseModel):
+    """任务分组模型"""
+    task_id: str
+    task_time: str
+    files: List[FileInfo]
+
+
+def parse_task_timestamp(timestamp_str: str) -> Optional[float]:
+    """
+    将任务时间戳字符串转换为Unix时间戳
+    
+    【参数】
+    timestamp_str: 时间戳字符串，如 "20260302_112930"
+    
+    【返回值】
+    float: Unix时间戳，解析失败返回 None
+    """
+    try:
+        dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def extract_task_id(filename: str) -> Optional[str]:
+    """
+    从文件名或目录名中提取任务ID
+    
+    【命名规范】
+    - 日志文件: agent_{task_id}.log, session_{task_id}.json
+    - 过程目录: process/{task_id}/
+    - 性能文件: logs/performance/perf_{task_id}.json
+    
+    【参数】
+    filename: 文件名或目录名
+    
+    【返回值】
+    任务ID，如 "20260302_112930"
+    """
+    match = re.search(r'(\d{8}_\d{6})', filename)
+    if match:
+        return match.group(1)
+    return None
+
+
+def group_task_ids_by_time(task_ids: list, threshold_seconds: float = 120) -> dict:
+    """
+    将相近时间的任务ID分组
+    
+    【设计思路】
+    由于历史文件的时间戳可能存在秒级差异，需要将相近时间的文件归为同一任务。
+    使用时间阈值（默认120秒）来判断两个时间戳是否属于同一任务。
+    
+    【参数】
+    task_ids: 任务ID列表
+    threshold_seconds: 时间阈值（秒），默认120秒
+    
+    【返回值】
+    dict: {原始task_id: 分组后的代表task_id}
+    """
+    if not task_ids:
+        return {}
+    
+    # 解析时间戳并排序
+    timestamp_data = []
+    for tid in task_ids:
+        ts = parse_task_timestamp(tid)
+        if ts:
+            timestamp_data.append((tid, ts))
+    
+    # 按时间排序
+    timestamp_data.sort(key=lambda x: x[1])
+    
+    # 分组：相邻时间差小于阈值的归为一组
+    groups = []
+    current_group = [timestamp_data[0]]
+    
+    for i in range(1, len(timestamp_data)):
+        prev_ts = timestamp_data[i-1][1]
+        curr_ts = timestamp_data[i][1]
+        
+        if curr_ts - prev_ts <= threshold_seconds:
+            current_group.append(timestamp_data[i])
+        else:
+            groups.append(current_group)
+            current_group = [timestamp_data[i]]
+    
+    groups.append(current_group)
+    
+    # 创建映射：每个task_id映射到组内最早的task_id
+    mapping = {}
+    for group in groups:
+        # 使用组内最早的task_id作为代表
+        representative = group[0][0]
+        for tid, _ in group:
+            mapping[tid] = representative
+    
+    return mapping
+
+
+@app.get("/api/files/logs")
+async def get_log_files():
+    """
+    获取日志文件列表
+    
+    返回 logs 目录下的所有文件，按时间倒序排列
+    """
+    files = []
+    
+    if not LOGS_DIR.exists():
+        return {"files": [], "groups": []}
+    
+    for file_path in LOGS_DIR.iterdir():
+        if file_path.is_file():
+            stat = file_path.stat()
+            file_type = "log"
+            
+            if "session" in file_path.name:
+                file_type = "session"
+            elif "perf" in file_path.name:
+                file_type = "performance"
+            elif file_path.suffix == ".json":
+                file_type = "json"
+            
+            files.append({
+                "name": file_path.name,
+                "path": str(file_path),
+                "type": file_type,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            })
+    
+    files.sort(key=lambda x: x["modified"], reverse=True)
+    
+    return {"files": files}
+
+
+@app.get("/api/files/process")
+async def get_process_files():
+    """
+    获取过程文件列表
+    
+    返回 process 目录下的所有文件，按任务分组
+    """
+    groups = {}
+    
+    if not PROCESS_DIR.exists():
+        return {"groups": []}
+    
+    for task_dir in PROCESS_DIR.iterdir():
+        if task_dir.is_dir():
+            task_id = task_dir.name
+            task_files = []
+            
+            for file_path in task_dir.iterdir():
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    file_type = "process"
+                    
+                    if "action" in file_path.name:
+                        file_type = "action"
+                    elif "decision" in file_path.name:
+                        file_type = "decision"
+                    elif "elements" in file_path.name:
+                        file_type = "elements"
+                    
+                    task_files.append({
+                        "name": file_path.name,
+                        "path": str(file_path),
+                        "type": file_type,
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "task_id": task_id
+                    })
+            
+            task_files.sort(key=lambda x: x["name"])
+            
+            task_time = task_id.replace("_", " ")
+            groups[task_id] = {
+                "task_id": task_id,
+                "task_time": task_time,
+                "files": task_files
+            }
+    
+    sorted_groups = sorted(groups.values(), key=lambda x: x["task_id"], reverse=True)
+    
+    return {"groups": sorted_groups}
+
+
+@app.get("/api/files/content")
+async def get_file_content(file_path: str):
+    """
+    获取文件内容
+    
+    安全地读取指定文件的内容，支持文本和JSON格式
+    """
+    try:
+        path = Path(file_path)
+        
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        resolved_path = str(path.resolve()).lower()
+        allowed_prefixes = [
+            "d:\\mycode\\code_c\\c_multiple\\web_ui_agent\\logs",
+            "d:/mycode/code_c/c_multiple/web_ui_agent/logs",
+            "d:\\mycode\\code_c\\c_multiple\\web_ui_agent\\process",
+            "d:/mycode/code_c/c_multiple/web_ui_agent/process",
+        ]
+        
+        if not any(resolved_path.startswith(prefix.lower()) for prefix in allowed_prefixes):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        stat = path.stat()
+        file_size = stat.st_size
+        
+        if file_size > 10 * 1024 * 1024:
+            return {
+                "content": None,
+                "error": "File too large (max 10MB)",
+                "size": file_size,
+                "name": path.name,
+                "type": path.suffix
+            }
+        
+        if path.suffix == ".json":
+            with open(path, "r", encoding="utf-8") as f:
+                content = json.load(f)
+            return {
+                "content": content,
+                "format": "json",
+                "size": file_size,
+                "name": path.name,
+                "type": path.suffix
+            }
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {
+                "content": content,
+                "format": "text",
+                "size": file_size,
+                "name": path.name,
+                "type": path.suffix
+            }
+    
+    except json.JSONDecodeError:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {
+            "content": content,
+            "format": "text",
+            "size": file_size,
+            "name": path.name,
+            "type": path.suffix
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/files/all")
+async def get_all_files():
+    """
+    获取所有文件（日志、过程、性能文件）
+    
+    按任务分组返回，使用智能时间匹配
+    将相近时间（120秒内）的文件归为同一任务
+    
+    结构：
+    <某个任务>
+    ├── logs (日志文件: agent_*.log, session_*.json)
+    ├── process (过程文件)
+    └── performance (性能文件: perf_*.json)
+    """
+    # 第一步：收集所有任务ID
+    all_task_ids = set()
+    
+    # 从日志文件收集
+    if LOGS_DIR.exists():
+        for file_path in LOGS_DIR.iterdir():
+            if file_path.is_file():
+                task_id = extract_task_id(file_path.name)
+                if task_id:
+                    all_task_ids.add(task_id)
+    
+    # 从性能文件收集
+    if PERFORMANCE_DIR.exists():
+        for file_path in PERFORMANCE_DIR.iterdir():
+            if file_path.is_file() and file_path.suffix == ".json":
+                task_id = extract_task_id(file_path.name)
+                if task_id:
+                    all_task_ids.add(task_id)
+    
+    # 从过程目录收集
+    if PROCESS_DIR.exists():
+        for task_dir in PROCESS_DIR.iterdir():
+            if task_dir.is_dir():
+                task_id = task_dir.name
+                if re.match(r'\d{8}_\d{6}', task_id):
+                    all_task_ids.add(task_id)
+    
+    # 第二步：智能分组 - 将相近时间的任务ID合并
+    task_id_mapping = group_task_ids_by_time(list(all_task_ids), threshold_seconds=120)
+    
+    # 第三步：按分组后的任务ID组织文件
+    task_groups = {}
+    
+    # 处理日志文件
+    if LOGS_DIR.exists():
+        for file_path in LOGS_DIR.iterdir():
+            if file_path.is_file():
+                stat = file_path.stat()
+                file_type = "log"
+                
+                if "session" in file_path.name:
+                    file_type = "session"
+                elif "test_results" in file_path.name:
+                    file_type = "test"
+                
+                original_task_id = extract_task_id(file_path.name)
+                if original_task_id:
+                    # 使用分组后的代表task_id
+                    grouped_task_id = task_id_mapping.get(original_task_id, original_task_id)
+                    
+                    if grouped_task_id not in task_groups:
+                        task_groups[grouped_task_id] = {
+                            "task_id": grouped_task_id,
+                            "task_time": grouped_task_id.replace("_", " "),
+                            "logs": [],
+                            "process": [],
+                            "performance": []
+                        }
+                    
+                    task_groups[grouped_task_id]["logs"].append({
+                        "name": file_path.name,
+                        "path": str(file_path),
+                        "type": file_type,
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "category": "logs"
+                    })
+    
+    # 处理性能文件
+    if PERFORMANCE_DIR.exists():
+        for file_path in PERFORMANCE_DIR.iterdir():
+            if file_path.is_file() and file_path.suffix == ".json":
+                stat = file_path.stat()
+                original_task_id = extract_task_id(file_path.name)
+                
+                if original_task_id:
+                    grouped_task_id = task_id_mapping.get(original_task_id, original_task_id)
+                    
+                    if grouped_task_id not in task_groups:
+                        task_groups[grouped_task_id] = {
+                            "task_id": grouped_task_id,
+                            "task_time": grouped_task_id.replace("_", " "),
+                            "logs": [],
+                            "process": [],
+                            "performance": []
+                        }
+                    
+                    task_groups[grouped_task_id]["performance"].append({
+                        "name": file_path.name,
+                        "path": str(file_path),
+                        "type": "performance",
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "category": "performance"
+                    })
+    
+    # 处理过程文件
+    if PROCESS_DIR.exists():
+        for task_dir in PROCESS_DIR.iterdir():
+            if task_dir.is_dir():
+                original_task_id = task_dir.name
+                if re.match(r'\d{8}_\d{6}', original_task_id):
+                    grouped_task_id = task_id_mapping.get(original_task_id, original_task_id)
+                    
+                    if grouped_task_id not in task_groups:
+                        task_groups[grouped_task_id] = {
+                            "task_id": grouped_task_id,
+                            "task_time": grouped_task_id.replace("_", " "),
+                            "logs": [],
+                            "process": [],
+                            "performance": []
+                        }
+                    
+                    for file_path in task_dir.iterdir():
+                        if file_path.is_file():
+                            stat = file_path.stat()
+                            file_type = "process"
+                            
+                            if "action" in file_path.name:
+                                file_type = "action"
+                            elif "decision" in file_path.name:
+                                file_type = "decision"
+                            elif "elements" in file_path.name:
+                                file_type = "elements"
+                            
+                            task_groups[grouped_task_id]["process"].append({
+                                "name": file_path.name,
+                                "path": str(file_path),
+                                "type": file_type,
+                                "size": stat.st_size,
+                                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                                "category": "process"
+                            })
+    
+    # 排序文件
+    for task_id in task_groups:
+        task_groups[task_id]["logs"].sort(key=lambda x: x["name"], reverse=True)
+        task_groups[task_id]["process"].sort(key=lambda x: x["name"])
+        task_groups[task_id]["performance"].sort(key=lambda x: x["name"], reverse=True)
+    
+    # 按任务ID倒序排列
+    sorted_groups = sorted(task_groups.values(), key=lambda x: x["task_id"], reverse=True)
+    
+    return {"groups": sorted_groups}
 
 
 # ================================================================================
@@ -777,6 +1939,12 @@ async def websocket_endpoint(websocket: WebSocket):
             "payload": agent_state.get_state_dict()
         })
         
+        # 发送连接成功消息
+        await websocket.send_json({
+            "type": "connection_status",
+            "payload": {"connected": True}
+        })
+        
         # 发送最新截图（如果有）
         if agent_state.latest_screenshot:
             await websocket.send_json({
@@ -790,10 +1958,19 @@ async def websocket_endpoint(websocket: WebSocket):
         # 保持连接并处理消息
         while True:
             try:
-                message = await websocket.receive_json()
+                # 使用 receive_text 或 receive_json，处理连接关闭的情况
+                raw_message = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=30.0  # 30秒超时
+                )
+                
+                try:
+                    message = json.loads(raw_message)
+                except json.JSONDecodeError:
+                    continue
                 
                 msg_type = message.get("type")
-                payload = message.get("payload")
+                payload = message.get("payload", {})
                 
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
@@ -814,22 +1991,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 
                 elif msg_type == "mouse_click":
-                    # 处理鼠标点击
                     x = payload.get("x", 0)
                     y = payload.get("y", 0)
                     await agent_state.click(x, y)
                 
                 elif msg_type == "type_text":
-                    # 处理文本输入
                     text = payload.get("text", "")
                     await agent_state.type_text(text)
                     
+            except asyncio.TimeoutError:
+                # 发送心跳保持连接
+                try:
+                    await websocket.send_json({"type": "heartbeat"})
+                except:
+                    break
+                continue
+                    
+            except WebSocketDisconnect:
+                break
             except Exception as e:
                 print(f"WebSocket message error: {e}")
                 break
                 
     except WebSocketDisconnect:
-        print("WebSocket disconnected")
+        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
     finally:
         if websocket in agent_state.websocket_clients:
             agent_state.websocket_clients.remove(websocket)

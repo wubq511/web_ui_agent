@@ -25,6 +25,31 @@ from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field, asdict
 
 from config import LOG_DIR, LOG_LEVEL, LOG_MAX_SIZE, LOG_BACKUP_COUNT
+from security_utils import mask_string, is_sensitive_field, sanitize_log_message
+from task_manager import get_current_task_id, get_task_manager
+
+
+def _mask_step_log(log_dict: dict) -> dict:
+    """脱敏步骤日志"""
+    result = log_dict.copy()
+    if result.get("value") and isinstance(result["value"], str):
+        result["value"] = mask_string(result["value"], show_prefix=1, show_suffix=1)
+    if result.get("thought") and isinstance(result["thought"], str):
+        result["thought"] = sanitize_log_message(result["thought"])
+    if result.get("result") and isinstance(result["result"], str):
+        result["result"] = sanitize_log_message(result["result"])
+    return result
+
+
+def _mask_decision_log(log_dict: dict) -> dict:
+    """脱敏决策日志"""
+    result = log_dict.copy()
+    if result.get("llm_response") and isinstance(result["llm_response"], str):
+        result["llm_response"] = sanitize_log_message(result["llm_response"])
+    if result.get("parsed_decision") and isinstance(result["parsed_decision"], dict):
+        from security_utils import mask_sensitive_in_dict
+        result["parsed_decision"] = mask_sensitive_in_dict(result["parsed_decision"])
+    return result
 
 
 @dataclass
@@ -76,7 +101,8 @@ class AgentLogger:
     def __init__(self, log_dir: str = LOG_DIR, 
                  log_level: str = LOG_LEVEL,
                  max_size: int = LOG_MAX_SIZE,
-                 backup_count: int = LOG_BACKUP_COUNT):
+                 backup_count: int = LOG_BACKUP_COUNT,
+                 task_id: str = None):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
@@ -84,7 +110,13 @@ class AgentLogger:
         self.max_size = max_size
         self.backup_count = backup_count
         
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if task_id:
+            self._session_id = task_id
+        else:
+            self._session_id = get_current_task_id()
+            if not self._session_id:
+                self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         self._session_start_time = time.time()
         
         self._logger = self._setup_logger()
@@ -296,16 +328,19 @@ class AgentLogger:
         }
     
     def save_session_log(self) -> str:
-        """保存会话日志"""
+        """保存会话日志（自动脱敏敏感信息）"""
         log_file = self.log_dir / f"session_{self._session_id}.json"
+        
+        masked_steps = [_mask_step_log(asdict(log)) for log in self._step_logs]
+        masked_decisions = [_mask_decision_log(asdict(log)) for log in self._decision_logs]
         
         session_data = {
             "session_id": self._session_id,
             "start_time": self._session_start_time,
             "end_time": time.time(),
             "performance": self.get_performance_report(),
-            "steps": [asdict(log) for log in self._step_logs],
-            "decisions": [asdict(log) for log in self._decision_logs],
+            "steps": masked_steps,
+            "decisions": masked_decisions,
             "resources": [asdict(log) for log in self._resource_logs]
         }
         
@@ -325,7 +360,9 @@ class AgentLogger:
         self._step_logs.clear()
         self._decision_logs.clear()
         self._resource_logs.clear()
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_id = get_current_task_id()
+        if not self._session_id:
+            self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._session_start_time = time.time()
     
     def to_dict(self) -> dict:

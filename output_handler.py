@@ -31,6 +31,72 @@ from datetime import datetime
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
+from security_utils import mask_string, is_sensitive_field, sanitize_log_message
+from task_manager import get_current_task_id
+
+
+SENSITIVE_VALUE_FIELDS = {"password", "pwd", "passwd", "secret", "token", "api_key", "key"}
+
+
+def mask_sensitive_in_dict(data: dict) -> dict:
+    """
+    递归脱敏字典中的敏感信息
+    
+    【参数】
+    data: 原始字典
+    
+    【返回值】
+    脱敏后的字典副本
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    result = {}
+    for key, value in data.items():
+        key_lower = key.lower() if isinstance(key, str) else ""
+        
+        if isinstance(value, str):
+            if is_sensitive_field(key) or any(s in key_lower for s in SENSITIVE_VALUE_FIELDS):
+                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            else:
+                result[key] = value
+        elif isinstance(value, dict):
+            result[key] = mask_sensitive_in_dict(value)
+        elif isinstance(value, list):
+            result[key] = [
+                mask_sensitive_in_dict(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    
+    return result
+
+
+def mask_password_in_thought(thought: str) -> str:
+    """
+    脱敏思考过程中的密码信息
+    
+    【参数】
+    thought: 原始思考文本
+    
+    【返回值】
+    脱敏后的文本
+    """
+    import re
+    
+    patterns = [
+        (r"(密码[是为：:'\"\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
+        (r"(password[=:\\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
+        (r"(pwd[=:\\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
+    ]
+    
+    result = thought
+    for pattern, replacement in patterns:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    
+    return result
+
 
 class OutputHandler:
     """
@@ -48,13 +114,14 @@ class OutputHandler:
     3. 批量写入
     """
     
-    def __init__(self, base_dir: str = None, async_mode: bool = True):
+    def __init__(self, base_dir: str = None, async_mode: bool = True, task_id: str = None):
         """
         初始化输出处理器
         
         【参数】
         base_dir: str - 基础目录路径，默认为当前文件所在目录
         async_mode: bool - 是否启用异步写入模式
+        task_id: str - 任务ID，如果不提供则从任务管理器获取
         """
         if base_dir is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +130,12 @@ class OutputHandler:
         self.current_step = 0
         self._async_mode = async_mode
         
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if task_id:
+            self.session_id = task_id
+        else:
+            self.session_id = get_current_task_id()
+            if not self.session_id:
+                self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         self.session_dir = os.path.join(self.process_dir, self.session_id)
         
@@ -178,7 +250,7 @@ class OutputHandler:
     
     def write_decision(self, decision: dict, thought: str, step: int):
         """
-        将决策详细信息写入文件
+        将决策详细信息写入文件（自动脱敏敏感信息）
         
         【参数】
         decision: dict - 决策内容
@@ -191,11 +263,14 @@ class OutputHandler:
         filename = f"step_{step:03d}_decision.json"
         filepath = os.path.join(self.session_dir, filename)
         
+        masked_decision = mask_sensitive_in_dict(decision) if decision else {}
+        masked_thought = mask_password_in_thought(thought) if thought else ""
+        
         data = {
             "step": step,
             "timestamp": datetime.now().isoformat(),
-            "thought": thought,
-            "decision": decision
+            "thought": masked_thought,
+            "decision": masked_decision
         }
         
         self._write_file(filepath, data)
@@ -205,7 +280,7 @@ class OutputHandler:
     def write_action_result(self, action_type: str, target_id: int, 
                            value: str, result: str, step: int, error: str = None):
         """
-        将执行结果详细信息写入文件
+        将执行结果详细信息写入文件（自动脱敏敏感信息）
         
         【参数】
         action_type: str - 动作类型
@@ -221,14 +296,22 @@ class OutputHandler:
         filename = f"step_{step:03d}_action.json"
         filepath = os.path.join(self.session_dir, filename)
         
+        if action_type and action_type.lower() in ("type", "input") and value:
+            masked_value = mask_string(value, show_prefix=1, show_suffix=1)
+        else:
+            masked_value = value
+        
+        masked_result = sanitize_log_message(result) if result else result
+        masked_error = sanitize_log_message(error) if error else error
+        
         data = {
             "step": step,
             "timestamp": datetime.now().isoformat(),
             "action_type": action_type,
             "target_id": target_id,
-            "value": value,
-            "result": result,
-            "error": error
+            "value": masked_value,
+            "result": masked_result,
+            "error": masked_error
         }
         
         self._write_file(filepath, data)
