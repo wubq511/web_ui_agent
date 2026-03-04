@@ -4,19 +4,19 @@
  * ================================================================================
  *
  * 【组件概述】
- * 实时显示模拟的浏览器页面截图，让用户可以看到 Agent 的操作过程。
- * 使用模拟数据，不与后端交互。
+ * 实时显示浏览器页面截图，让用户可以看到 Agent 的操作过程。
+ * 通过 WebSocket 接收后端推送的截图流。
  *
  * 【功能说明】
- * - 接收模拟 WebSocket 实时截图流
+ * - 接收 WebSocket 实时截图流
  * - 显示当前页面 URL
  * - 支持全屏模式
- * - 显示加载状态
+ * - 显示加载状态和帧率信息
  * ================================================================================
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Monitor, Maximize2, Minimize2, ExternalLink, Image as ImageIcon } from 'lucide-react';
+import { Monitor, Maximize2, Minimize2, ExternalLink, Image as ImageIcon, RefreshCw } from 'lucide-react';
 import { wsClient } from '../services/api';
 
 const LiveView: React.FC = () => {
@@ -30,8 +30,14 @@ const LiveView: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   // 最后更新时间
   const [lastUpdate, setLastUpdate] = useState<string>('');
+  // 帧率显示
+  const [fps, setFps] = useState<number>(0);
+  // 连接状态
+  const [isConnected, setIsConnected] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const frameCountRef = useRef<number>(0);
+  const lastFpsUpdateRef = useRef<number>(Date.now());
 
   /**
    * 订阅 WebSocket 截图消息
@@ -45,6 +51,15 @@ const LiveView: React.FC = () => {
           setScreenshot(data.screenshot);
           setIsLoading(false);
           setLastUpdate(new Date().toLocaleTimeString());
+          
+          // 计算帧率
+          frameCountRef.current++;
+          const now = Date.now();
+          if (now - lastFpsUpdateRef.current >= 1000) {
+            setFps(frameCountRef.current);
+            frameCountRef.current = 0;
+            lastFpsUpdateRef.current = now;
+          }
         }
         if (data.url) {
           setCurrentUrl(data.url);
@@ -52,8 +67,14 @@ const LiveView: React.FC = () => {
       }
     );
 
+    // 订阅连接状态
+    const unsubConnection = wsClient.on('connection_status', (data: { connected: boolean }) => {
+      setIsConnected(data.connected);
+    });
+
     return () => {
       unsubscribe();
+      unsubConnection();
     };
   }, []);
 
@@ -85,9 +106,23 @@ const LiveView: React.FC = () => {
           <h3 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">
             Live View
           </h3>
-          <span className="text-[10px] px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
-            Mock Mode
-          </span>
+          {/* 连接状态指示器 */}
+          <div className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] ${
+            isConnected 
+              ? 'bg-green-500/20 text-green-400' 
+              : 'bg-red-500/20 text-red-400'
+          }`}>
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+            }`} />
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </div>
+          {/* 帧率显示 */}
+          {fps > 0 && (
+            <span className="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 text-blue-400">
+              {fps} FPS
+            </span>
+          )}
           {lastUpdate && (
             <span className="text-[10px] text-slate-500">
               Updated: {lastUpdate}
@@ -179,6 +214,12 @@ const LiveView: React.FC = () => {
                   Start the agent to see live view
                 </p>
               </div>
+              {!isConnected && (
+                <div className="flex items-center gap-2 text-xs text-yellow-500 mt-2">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  Waiting for connection...
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -186,9 +227,11 @@ const LiveView: React.FC = () => {
         {/* 状态覆盖层 */}
         <div className="absolute bottom-4 right-4 flex items-center gap-2">
           <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-900/80 border border-white/10 backdrop-blur-sm">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+            }`} />
             <span className="text-[10px] text-slate-400 uppercase tracking-wider">
-              Mock
+              {isConnected ? 'LIVE' : 'OFFLINE'}
             </span>
           </div>
         </div>

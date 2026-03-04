@@ -40,7 +40,12 @@ except ImportError:
     print("Warning: Playwright not available. Browser features disabled.")
 
 # 导入配置
-from config import AVAILABLE_MODELS, DEFAULT_MODEL
+from config import (
+    AVAILABLE_MODELS, DEFAULT_MODEL,
+    CDP_PORT, CDP_HOST,
+    SCREENSHOT_TARGET_FPS, SCREENSHOT_MIN_FPS, SCREENSHOT_MAX_FPS,
+    SCREENSHOT_JPEG_QUALITY, SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT
+)
 
 # 导入安全工具
 from security_utils import mask_string, sanitize_log_message
@@ -116,11 +121,17 @@ class AgentStateManager:
         self.page: Optional[Page] = None
         self.playwright = None
         
-        # 截图流控制 - 30fps
+        # 截图流控制 - 动态帧率
         self.screenshot_task: Optional[asyncio.Task] = None
-        self.screenshot_interval: float = 0.033  # 33ms = 30fps
+        self.screenshot_interval: float = 1.0 / SCREENSHOT_TARGET_FPS
         self.latest_screenshot: Optional[str] = None
         self.is_capturing: bool = False
+        # 动态帧率控制
+        self._current_fps: float = SCREENSHOT_TARGET_FPS
+        self._last_screenshot_time: float = 0
+        self._screenshot_durations: List[float] = []  # 记录最近截图耗时
+        self._screenshot_cache: Optional[bytes] = None  # 截图字节缓存
+        self._last_screenshot_hash: Optional[str] = None  # 上次截图的哈希值（用于差分检测）
         
         # 命令执行相关
         self.command_process: Optional[asyncio.subprocess.Process] = None
@@ -330,7 +341,11 @@ class AgentStateManager:
     
     async def launch_browser(self) -> bool:
         """
-        启动浏览器
+        启动或连接浏览器
+        
+        【设计思路】
+        1. 首先尝试通过 CDP 连接到 agent 已启动的浏览器（localhost:9222）
+        2. 如果连接失败，则启动独立的浏览器实例
         
         Returns:
             启动成功返回 True，失败返回 False
@@ -340,39 +355,65 @@ class AgentStateManager:
             return False
         
         try:
-            self.add_log("Starting playwright...", "info")
-            self.playwright = await async_playwright().start()
-            self.add_log("Playwright started, launching chromium...", "info")
+            if not self.playwright:
+                self.add_log("Starting playwright...", "info")
+                self.playwright = await async_playwright().start()
             
-            # 启动 Chromium 浏览器（无头模式）
-            # 在 Windows 上可能需要设置 executable_path
+            # 首先尝试连接到 agent 的浏览器（通过 CDP）
+            cdp_url = f"http://{CDP_HOST}:{CDP_PORT}"
+            self.add_log(f"Trying to connect to agent browser via CDP: {cdp_url}", "info")
+            
             try:
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+                self.add_log("Connected to agent browser via CDP", "success")
+                
+                # 获取现有的上下文和页面 - 使用最新的
+                contexts = self.browser.contexts
+                if contexts:
+                    # 获取最后一个 context（最新创建的）
+                    self.context = contexts[-1]
+                    pages = self.context.pages
+                    if pages:
+                        # 获取最后一个页面（最新打开的）
+                        self.page = pages[-1]
+                        self.add_log(f"Using latest page: {self.page.url[:50] if self.page.url else 'about:blank'}", "info")
+                    else:
+                        self.page = await self.context.new_page()
+                        self.add_log("Created new page in existing context", "info")
+                else:
+                    self.context = await self.browser.new_context(
+                        viewport={'width': SCREENSHOT_MAX_WIDTH, 'height': SCREENSHOT_MAX_HEIGHT}
+                    )
+                    self.page = await self.context.new_page()
+                    self.add_log("Created new context and page", "info")
+                
+                # 设置浏览器级别的监听器
+                self._setup_browser_listeners()
+                
+                return True
+                
+            except Exception as cdp_error:
+                self.add_log(f"CDP connection failed: {str(cdp_error)[:100]}", "warning")
+                self.add_log("Launching independent browser instance...", "info")
+                
+                # CDP 连接失败，启动独立浏览器
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox']
+                    args=[
+                        '--no-sandbox', 
+                        '--disable-setuid-sandbox',
+                        f'--window-size={SCREENSHOT_MAX_WIDTH},{SCREENSHOT_MAX_HEIGHT}'
+                    ]
                 )
-            except Exception as launch_error:
-                # 如果启动失败，尝试打印更详细的错误
-                import traceback
-                error_detail = traceback.format_exc()
-                print(f"[BROWSER LAUNCH ERROR] {error_detail}")
-                self.add_log(f"Browser launch error: {str(launch_error)}", "error")
-                raise
-            
-            self.add_log("Chromium launched, creating context...", "info")
-            
-            # 创建浏览器上下文
-            self.context = await self.browser.new_context(
-                viewport={'width': 1280, 'height': 720}
-            )
-            
-            self.add_log("Context created, creating page...", "info")
-            
-            # 创建新页面
-            self.page = await self.context.new_page()
-            
-            self.add_log("Browser launched successfully", "success")
-            return True
+                
+                self.context = await self.browser.new_context(
+                    viewport={'width': SCREENSHOT_MAX_WIDTH, 'height': SCREENSHOT_MAX_HEIGHT}
+                )
+                
+                self.page = await self.context.new_page()
+                self.add_log("Independent browser launched", "success")
+                
+                return True
             
         except Exception as e:
             import traceback
@@ -381,78 +422,284 @@ class AgentStateManager:
             self.add_log(f"Failed to launch browser: {str(e)}", "error")
             return False
     
-    async def close_browser(self):
-        """关闭浏览器"""
+    def _setup_browser_listeners(self):
+        """
+        设置浏览器级别的监听器
+        
+        【功能说明】
+        1. 监听新 context 创建
+        2. 监听新页面创建
+        3. 自动切换到最新的活动页面
+        """
+        if not self.browser:
+            return
+        
+        def on_context_created(context):
+            print(f"[Screenshot Stream] New context created")
+            self.context = context
+            
+            # 在新 context 上监听页面创建
+            def on_page_created(page):
+                print(f"[Screenshot Stream] New page created: {page.url if page.url else 'about:blank'}")
+                self.page = page
+                self.add_log(f"Switched to new page: {page.url[:50] if page.url else 'about:blank'}", "info")
+            
+            context.on("page", on_page_created)
+            
+            # 如果 context 已有页面，切换到最新的
+            pages = context.pages
+            if pages:
+                self.page = pages[-1]
+                print(f"[Screenshot Stream] Using existing page: {self.page.url if self.page.url else 'about:blank'}")
+        
         try:
-            if self.page:
-                await self.page.close()
-                self.page = None
+            # 监听新 context 创建
+            self.browser.on("context", on_context_created)
+            print("[Screenshot Stream] Browser listeners set up successfully")
             
-            if self.context:
-                await self.context.close()
-                self.context = None
+            # 为现有的 context 也设置监听器
+            for ctx in self.browser.contexts:
+                def on_page_created_for_ctx(page, ctx=ctx):
+                    print(f"[Screenshot Stream] New page in existing context: {page.url if page.url else 'about:blank'}")
+                    self.page = page
+                    self.context = ctx
+                    self.add_log(f"Switched to new page: {page.url[:50] if page.url else 'about:blank'}", "info")
+                
+                ctx.on("page", on_page_created_for_ctx)
+                
+        except Exception as e:
+            print(f"[Screenshot Stream] Failed to set up browser listeners: {e}")
+    
+    def _setup_page_listener(self):
+        """
+        设置页面监听器（兼容旧调用）
+        
+        【功能说明】
+        当 agent 创建新页面时，自动切换到最新页面进行截图
+        """
+        # 调用新的 browser 级别监听器
+        self._setup_browser_listeners()
+    
+    async def try_connect_to_agent_browser(self) -> bool:
+        """
+        尝试连接到 agent 的浏览器
+        
+        【使用场景】
+        当 agent 通过 main.py 启动后，web_server 需要连接到其浏览器才能截图
+        
+        Returns:
+            连接成功返回 True
+        """
+        if not PLAYWRIGHT_AVAILABLE or not self.playwright:
+            return False
+        
+        try:
+            cdp_url = f"http://{CDP_HOST}:{CDP_PORT}"
+            self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
             
-            if self.browser:
-                await self.browser.close()
-                self.browser = None
+            contexts = self.browser.contexts
+            if contexts:
+                # 获取最后一个 context（最新创建的）
+                self.context = contexts[-1]
+                pages = self.context.pages
+                if pages:
+                    # 获取最后一个页面（最新打开的）
+                    self.page = pages[-1]
+                    self.add_log("Connected to agent browser", "success")
+                    # 设置页面监听器
+                    self._setup_page_listener()
+                    return True
             
+            return False
+        except Exception:
+            return False
+    
+    async def close_browser(self):
+        """
+        关闭浏览器连接
+        
+        【注意】
+        如果是通过 CDP 连接到 agent 的浏览器，我们只断开连接，不关闭浏览器
+        因为浏览器是由 agent 进程管理的
+        """
+        try:
+            # 首先停止截图流
+            await self.stop_screenshot_stream()
+            
+            # 断开页面引用（不关闭，因为可能是 agent 的页面）
+            self.page = None
+            self.context = None
+            
+            # 如果是独立启动的浏览器，才关闭它
+            # CDP 连接的浏览器不应该被我们关闭
+            if self.browser and self.browser.is_connected():
+                try:
+                    # 检查是否是 CDP 连接
+                    # CDP 连接的浏览器调用 close() 会关闭整个浏览器，包括 agent 的
+                    # 所以我们只断开连接
+                    self.browser = None
+                except Exception:
+                    pass
+            
+            # 只有当我们独立启动了 playwright 时才停止它
+            # 这需要更复杂的逻辑来判断，暂时保留
             if self.playwright:
-                await self.playwright.stop()
-                self.playwright = None
+                # 不停止 playwright，因为它可能被重用
+                pass
             
-            self.add_log("Browser closed", "info")
+            self.add_log("Browser connection closed", "info")
             
         except Exception as e:
             print(f"Error closing browser: {e}")
     
     async def start_screenshot_stream(self):
-        """启动高频截图流 (30fps)"""
+        """启动高频截图流（动态帧率）"""
         self.is_capturing = True
         if self.screenshot_task:
             self.screenshot_task.cancel()
         
+        # 重置帧率控制变量
+        self._current_fps = SCREENSHOT_TARGET_FPS
+        self._screenshot_durations = []
+        
         self.screenshot_task = asyncio.create_task(self._screenshot_loop())
+        self.add_log(f"Screenshot stream started (target: {SCREENSHOT_TARGET_FPS}fps)", "info")
     
     async def stop_screenshot_stream(self):
         """停止截图流"""
         self.is_capturing = False
         if self.screenshot_task:
             self.screenshot_task.cancel()
+            try:
+                await self.screenshot_task
+            except asyncio.CancelledError:
+                pass
             self.screenshot_task = None
+        self.add_log("Screenshot stream stopped", "info")
+    
+    def _calculate_dynamic_interval(self, screenshot_duration: float) -> float:
+        """
+        计算动态截图间隔
+        
+        【算法说明】
+        根据截图耗时动态调整帧率：
+        - 如果截图很快（< 20ms），保持高帧率
+        - 如果截图较慢，降低帧率以保证稳定性
+        - 避免帧率过低（最低 10fps）
+        """
+        # 记录最近的截图耗时
+        self._screenshot_durations.append(screenshot_duration)
+        if len(self._screenshot_durations) > 10:
+            self._screenshot_durations.pop(0)
+        
+        # 计算平均耗时
+        avg_duration = sum(self._screenshot_durations) / len(self._screenshot_durations)
+        
+        # 目标帧间隔 = 目标帧时间 - 平均截图耗时
+        target_frame_time = 1.0 / SCREENSHOT_TARGET_FPS
+        ideal_interval = max(0.001, target_frame_time - avg_duration)
+        
+        # 计算实际帧率
+        actual_fps = 1.0 / (avg_duration + ideal_interval)
+        
+        # 限制帧率范围
+        if actual_fps > SCREENSHOT_MAX_FPS:
+            actual_fps = SCREENSHOT_MAX_FPS
+        elif actual_fps < SCREENSHOT_MIN_FPS:
+            actual_fps = SCREENSHOT_MIN_FPS
+        
+        self._current_fps = actual_fps
+        return 1.0 / actual_fps
     
     async def _screenshot_loop(self):
         """
-        高频截图循环 - 30fps
+        高频截图循环 - 动态帧率
         
-        持续截取浏览器页面并广播给前端
+        【优化特性】
+        1. 动态帧率调整：根据截图耗时自动调整帧率
+        2. 内存优化：重用缓存，减少临时对象
+        3. 差分检测：避免发送相同的截图
+        4. 自动切换到最新活动页面
         """
+        import time
+        import hashlib
+        
+        print(f"[Screenshot Loop] Started, is_capturing={self.is_capturing}")
+        
         while self.is_capturing:
             try:
-                if self.page and self.status in ["running", "paused"]:
-                    # 截取页面截图 - 使用较低质量以提高性能
-                    screenshot_bytes = await self.page.screenshot(
-                        type='jpeg',
-                        quality=60,  # 降低质量以提高速度
-                        full_page=False
-                    )
-                    
-                    # 转换为 base64
-                    screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-                    
-                    # 广播截图
-                    await self.broadcast_screenshot(f"data:image/jpeg;base64,{screenshot_base64}")
-                    
-                    # 更新当前 URL
-                    if self.page:
-                        self.current_url = self.page.url
+                start_time = time.time()
                 
-                await asyncio.sleep(self.screenshot_interval)
+                # 定期检查是否有更新的页面
+                if self.browser and self.browser.contexts:
+                    contexts = self.browser.contexts
+                    if contexts:
+                        latest_context = contexts[-1]
+                        if latest_context.pages:
+                            latest_page = latest_context.pages[-1]
+                            # 如果发现更新的页面，切换到它
+                            if latest_page != self.page:
+                                print(f"[Screenshot Loop] Switching to newer page: {latest_page.url if latest_page.url else 'about:blank'}")
+                                self.page = latest_page
+                                self.context = latest_context
+                
+                # 检查是否有可用的页面
+                if self.page:
+                    try:
+                        # 截取页面截图
+                        screenshot_bytes = await self.page.screenshot(
+                            type='jpeg',
+                            quality=SCREENSHOT_JPEG_QUALITY,
+                            full_page=False
+                        )
+                        
+                        # 计算截图哈希（用于差分检测）
+                        screenshot_hash = hashlib.md5(screenshot_bytes).hexdigest()[:16]
+                        
+                        # 只有当截图内容变化时才广播
+                        if screenshot_hash != self._last_screenshot_hash:
+                            self._last_screenshot_hash = screenshot_hash
+                            self._screenshot_cache = screenshot_bytes
+                            
+                            # 转换为 base64（直接使用缓存的字节）
+                            screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+                            
+                            # 广播截图
+                            await self.broadcast_screenshot(f"data:image/jpeg;base64,{screenshot_base64}")
+                        
+                        # 更新当前 URL
+                        try:
+                            self.current_url = self.page.url
+                        except Exception:
+                            pass
+                        
+                    except Exception as screenshot_error:
+                        error_str = str(screenshot_error).lower()
+                        # 截图失败时尝试重新连接浏览器
+                        if "target closed" in error_str or "disconnected" in error_str or "page closed" in error_str:
+                            print(f"[Screenshot Loop] Page error: {screenshot_error}")
+                            # 尝试获取其他可用页面
+                            if self.browser and self.browser.contexts:
+                                for ctx in reversed(self.browser.contexts):
+                                    if ctx.pages:
+                                        self.page = ctx.pages[-1]
+                                        self.context = ctx
+                                        print(f"[Screenshot Loop] Switched to backup page")
+                                        break
+                
+                # 计算截图耗时
+                screenshot_duration = time.time() - start_time
+                
+                # 动态调整间隔
+                dynamic_interval = self._calculate_dynamic_interval(screenshot_duration)
+                
+                await asyncio.sleep(dynamic_interval)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Screenshot error: {e}")
-                await asyncio.sleep(self.screenshot_interval)
+                await asyncio.sleep(0.1)  # 错误时等待稍长时间
     
     async def navigate_to(self, url: str) -> bool:
         """
@@ -606,6 +853,9 @@ class AgentStateManager:
             
             asyncio.create_task(self._read_command_output())
             
+            # 启动截图流（延迟启动，等待 agent 浏览器初始化）
+            asyncio.create_task(self._delayed_start_screenshot_stream())
+            
             self.add_log(f"Command started: {' '.join(cmd)}", "success")
             await self.broadcast_command_status()
             return True
@@ -616,6 +866,78 @@ class AgentStateManager:
             self.add_log(f"Failed to start command: {str(e)}", "error")
             await self.broadcast_command_status()
             return False
+    
+    async def _delayed_start_screenshot_stream(self, max_retries: int = 15, retry_delay: float = 1.0):
+        """
+        延迟启动截图流
+        
+        【设计思路】
+        agent 启动浏览器需要时间，我们延迟一段时间后尝试连接并启动截图流
+        
+        Args:
+            max_retries: 最大重试次数
+            retry_delay: 每次重试的间隔（秒）
+        """
+        import asyncio
+        
+        print(f"[Screenshot Stream] Waiting for agent browser to start...")
+        
+        for attempt in range(max_retries):
+            await asyncio.sleep(retry_delay)
+            
+            # 检查命令是否仍在运行
+            if self.command_status != "running":
+                self.add_log("Command not running, aborting screenshot stream", "info")
+                print(f"[Screenshot Stream] Command not running, aborting")
+                return
+            
+            # 尝试连接到 agent 的浏览器
+            try:
+                if not self.playwright:
+                    self.playwright = await async_playwright().start()
+                
+                cdp_url = f"http://{CDP_HOST}:{CDP_PORT}"
+                print(f"[Screenshot Stream] Attempt {attempt + 1}/{max_retries}: Connecting to {cdp_url}")
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+                
+                # 设置浏览器级别的监听器（监听新 context 和页面）
+                self._setup_browser_listeners()
+                
+                # 获取页面 - 使用最新的页面而不是第一个
+                contexts = self.browser.contexts
+                print(f"[Screenshot Stream] Found {len(contexts)} contexts")
+                
+                if contexts:
+                    # 获取最后一个 context（最新创建的）
+                    self.context = contexts[-1]
+                    pages = self.context.pages
+                    print(f"[Screenshot Stream] Found {len(pages)} pages in last context")
+                    
+                    if pages:
+                        # 获取最后一个页面（最新打开的）
+                        self.page = pages[-1]
+                        page_url = self.page.url if self.page.url else 'about:blank'
+                        self.add_log(f"Connected to agent browser: {page_url[:50]}", "success")
+                        print(f"[Screenshot Stream] Connected to latest page: {page_url}")
+                        
+                        # 启动截图流
+                        await self.start_screenshot_stream()
+                        print(f"[Screenshot Stream] Screenshot stream started successfully")
+                        return
+                    else:
+                        print(f"[Screenshot Stream] No pages found in context")
+                else:
+                    print(f"[Screenshot Stream] No contexts found")
+                
+            except Exception as e:
+                print(f"[Screenshot Stream] Connection attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    self.add_log(f"Waiting for agent browser... (attempt {attempt + 1}/{max_retries})", "info")
+                else:
+                    self.add_log(f"Failed to connect to agent browser after {max_retries} attempts", "warning")
+        
+        self.add_log("Screenshot stream not started (no browser connection)", "warning")
+        print(f"[Screenshot Stream] Failed to start after {max_retries} attempts")
     
     def _sanitize_arg(self, arg: str) -> str:
         """
@@ -804,6 +1126,9 @@ class AgentStateManager:
             
             # 同步更新 Agent 状态
             self.status = "completed" if self.command_exit_code == 0 else "error"
+            
+            # 停止截图流
+            await self.stop_screenshot_stream()
             
             # 任务结束时重置所有状态到默认值
             self.credential_manager_logged_in = False
@@ -1128,6 +1453,9 @@ class AgentStateManager:
         """
         if self.command_process and self.command_status == "running":
             try:
+                # 首先停止截图流
+                await self.stop_screenshot_stream()
+                
                 self.command_process.terminate()
                 try:
                     await asyncio.wait_for(self.command_process.wait(), timeout=5.0)

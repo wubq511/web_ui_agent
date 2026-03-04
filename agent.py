@@ -204,6 +204,8 @@ class WebUIAgent:
             '--lang=zh-CN',
             # 禁用站点隔离（可能有助于某些检测）
             '--disable-site-isolation-trials',
+            # 启用远程调试端口（用于 web_server 截图流）
+            '--remote-debugging-port=9222',
             # 注意：Playwright 的 launch() 不支持 --user-data-dir 参数
             # 如需持久化用户数据，应使用 launch_persistent_context() 方法
         ]

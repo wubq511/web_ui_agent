@@ -228,3 +228,15 @@ PROXY_SERVER = None  # 例如: "http://127.0.0.1:7890"
 # 本地Chrome路径（Windows默认路径）
 LOCAL_CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 LOCAL_CHROME_USER_DATA_DIR = r"C:\chrome_dev_profile"
+
+# CDP 远程调试端口配置（用于 web_server 连接 agent 的浏览器）
+CDP_PORT = 9222
+CDP_HOST = "localhost"
+
+# 截图流配置
+SCREENSHOT_TARGET_FPS = 30
+SCREENSHOT_MIN_FPS = 10
+SCREENSHOT_MAX_FPS = 30
+SCREENSHOT_JPEG_QUALITY = 60
+SCREENSHOT_MAX_WIDTH = 1280
+SCREENSHOT_MAX_HEIGHT = 720
