@@ -54,8 +54,9 @@ const ControlPanel: React.FC = () => {
   const isIdle = controlState.status === 'idle';
   const isStopped = controlState.status === 'stopped';
   
-  // 判断是否显示扩展终端模式（运行中或暂停时）
-  const showExpandedTerminal = isRunning || isPaused;
+  // 判断是否显示扩展终端模式
+  // 只有 idle 和 stopped 状态才隐藏终端，其他状态都保持显示
+  const showExpandedTerminal = !isIdle && !isStopped;
 
   // 选择模型
   const handleModelSelect = (modelId: string) => {

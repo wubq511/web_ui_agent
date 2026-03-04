@@ -41,7 +41,8 @@ def _mask_sensitive_in_state(state: dict) -> dict:
         return state
     
     SENSITIVE_KEYS = {"password", "pwd", "passwd", "secret", "token", "api_key", 
-                      "credential", "cookie", "session", "auth"}
+                      "credential", "cookie", "session", "auth", "value"}
+    SENSITIVE_ACTION_TYPES = {"type", "input", "fill", "enter"}
     
     result = {}
     for key, value in state.items():
@@ -49,9 +50,12 @@ def _mask_sensitive_in_state(state: dict) -> dict:
         
         if isinstance(value, str):
             if is_sensitive_field(str(key)) or any(s in key_str for s in SENSITIVE_KEYS):
-                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
-            elif len(value) > 20 and any(s in value.lower() for s in ["password", "token", "secret"]):
-                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+                if key_str == "value" and state.get("action_type", "").lower() not in SENSITIVE_ACTION_TYPES:
+                    result[key] = value
+                else:
+                    result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            elif len(value) > 10 and any(s in value.lower() for s in ["password", "token", "secret"]):
+                result[key] = sanitize_log_message(value)
             else:
                 result[key] = value
         elif isinstance(value, dict):

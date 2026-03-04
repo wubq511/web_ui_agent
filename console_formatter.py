@@ -23,6 +23,11 @@ import sys
 from datetime import datetime
 from typing import Optional
 
+from security_utils import mask_string, is_sensitive_field
+
+
+SENSITIVE_ACTION_TYPES = {"type", "input", "fill", "enter"}
+
 
 class Colors:
     """ANSI 颜色代码"""
@@ -102,7 +107,7 @@ def print_perception(elements_count: int, file_path: str):
 
 def print_decision(action_type: str, target_id: int = None, value: str = None):
     """
-    打印决策模块输出（简洁版）
+    打印决策模块输出（简洁版，自动脱敏敏感信息）
     
     【参数】
     action_type: str - 动作类型
@@ -119,7 +124,12 @@ def print_decision(action_type: str, target_id: int = None, value: str = None):
         parts.append(f"→ {target}")
     
     if value:
-        value_preview = value[:20] + "..." if len(str(value)) > 20 else value
+        action_lower = action_type.lower() if action_type else ""
+        if action_lower in SENSITIVE_ACTION_TYPES:
+            masked_value = mask_string(str(value), show_prefix=1, show_suffix=1)
+            value_preview = masked_value[:20] + "..." if len(masked_value) > 20 else masked_value
+        else:
+            value_preview = str(value)[:20] + "..." if len(str(value)) > 20 else str(value)
         val = colorize(f"'{value_preview}'", Colors.WHITE)
         parts.append(f"= {val}")
     

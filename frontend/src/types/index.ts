@@ -22,7 +22,7 @@
  * - paused: 任务被暂停
  * - stopped: 任务被停止
  * - completed: 任务已完成
- * - error: 发生错误
+ * - error: 发生错误（前端显示为 running）
  */
 export type AgentStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'completed' | 'error';
 

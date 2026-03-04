@@ -16,7 +16,7 @@
  * - PAUSED: 黄色，静态
  * - STOPPED: 红色，静态
  * - COMPLETED: 蓝色，静态
- * - ERROR: 红色，静态
+ * - ERROR: 显示为 RUNNING（绿色，带呼吸动画）
  * - IDLE: 灰色，静态
  *
  * 【使用示例】
@@ -47,6 +47,7 @@ const Header: React.FC = () => {
   const getStatusStyle = () => {
     switch (state.status) {
       case 'running':
+      case 'error':
         return {
           bg: 'bg-green-500/20',
           text: 'text-green-400',
@@ -76,14 +77,6 @@ const Header: React.FC = () => {
           text: 'text-blue-400',
           dot: 'bg-blue-500',
           label: 'COMPLETED',
-          animate: false,
-        };
-      case 'error':
-        return {
-          bg: 'bg-red-500/20',
-          text: 'text-red-400',
-          dot: 'bg-red-500',
-          label: 'ERROR',
           animate: false,
         };
       default:

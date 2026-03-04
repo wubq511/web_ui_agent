@@ -42,6 +42,17 @@ except ImportError:
 # 导入配置
 from config import AVAILABLE_MODELS, DEFAULT_MODEL
 
+# 导入安全工具
+from security_utils import mask_string, sanitize_log_message
+
+# 导入暂停控制器
+try:
+    from pause_controller import PauseController, get_pause_controller
+    PAUSE_CONTROLLER_AVAILABLE = True
+except ImportError:
+    PAUSE_CONTROLLER_AVAILABLE = False
+    print("Warning: PauseController not available. Pause/Resume features disabled.")
+
 
 # ================================================================================
 # 请求模型
@@ -548,6 +559,8 @@ class AgentStateManager:
             self.add_log("Command already running", "warning")
             return False
         
+        # 设置 Agent 状态为 running
+        self.status = "running"
         self.command_status = "running"
         self.command_output = []
         self.command_exit_code = None
@@ -686,15 +699,6 @@ class AgentStateManager:
                         
                         self._parse_output_for_status(line_text)
                         
-                        # 检查步骤是否更新，如果更新则广播状态
-                        step_match = re.search(r'步骤\s*(\d+)', line_text)
-                        if step_match:
-                            new_step = int(step_match.group(1))
-                            if new_step != self.current_step:
-                                self.current_step = new_step
-                                print(f"[WebSocket] Step updated to {new_step}, broadcasting state (progressRatio: {self.current_step / self.max_steps:.2%})")
-                                await self.broadcast_state()
-                        
                         # 解析最大步骤数
                         max_steps_match = re.search(r'最大步骤:\s*(\d+)', line_text)
                         if max_steps_match:
@@ -703,7 +707,6 @@ class AgentStateManager:
                         
                         # 解析进度信息（基于多维度评估的准确进度）
                         # 格式: "📊 进度: 45% | 停滞: 2/8" (可能包含 ANSI 颜色代码)
-                        # 去除 ANSI 颜色代码后再匹配
                         clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line_text)
                         progress_match = re.search(r'📊 进度:\s*(\d+)%', clean_line)
                         if progress_match:
@@ -711,21 +714,24 @@ class AgentStateManager:
                             if new_progress != self.progress_ratio:
                                 self.progress_ratio = new_progress
                                 print(f"[WebSocket] Progress updated to {new_progress:.0%}")
-                                await self.broadcast_state()
                         
                         # 解析凭证管理器登录状态
                         if "✅ 凭证管理器登录成功" in line_text:
                             self.credential_manager_logged_in = True
-                            print(f"[WebSocket] Credential manager logged in, broadcasting state update")
-                            await self.broadcast_state()
+                            print(f"[WebSocket] Credential manager logged in")
                         
-                        # 解析任务复杂度更新（在异步上下文中处理）
+                        # 解析任务复杂度更新
                         complexity_match = re.search(r'任务复杂度更新:\s*(simple|medium|complex|very_complex)', line_text)
                         if complexity_match:
                             new_complexity = complexity_match.group(1)
                             if new_complexity != self.task_complexity:
                                 self.task_complexity = new_complexity
-                                await self._broadcast_complexity_update(new_complexity)
+                                print(f"[WebSocket] Task complexity updated to {new_complexity}")
+                        
+                        # 广播状态更新（每次输出都广播，确保前端实时显示）
+                        # 打印当前状态用于调试
+                        print(f"[WebSocket] Broadcasting state: step={self.current_step}, stepDesc={self.step_description[:50]}, lastAction={self.last_action[:30]}")
+                        await self.broadcast_state()
                         
                         if self._is_input_required(line_text):
                             await self._handle_input_request(line_text)
@@ -759,7 +765,10 @@ class AgentStateManager:
                                     }
                                 })
                                 
-                                # 解析进度信息（在 Timeout 分支中也处理）
+                                # 解析状态更新
+                                self._parse_output_for_status(chunk_stripped)
+                                
+                                # 解析进度信息
                                 clean_chunk = re.sub(r'\x1b\[[0-9;]*m', '', chunk_stripped)
                                 progress_match = re.search(r'📊 进度:\s*(\d+)%', clean_chunk)
                                 if progress_match:
@@ -767,21 +776,22 @@ class AgentStateManager:
                                     if new_progress != self.progress_ratio:
                                         self.progress_ratio = new_progress
                                         print(f"[WebSocket] Progress updated to {new_progress:.0%}")
-                                        await self.broadcast_state()
                                 
-                                # 解析凭证管理器登录状态（在 Timeout 分支中也处理）
+                                # 解析凭证管理器登录状态
                                 if "✅ 凭证管理器登录成功" in chunk_stripped:
                                     self.credential_manager_logged_in = True
                                     print(f"[WebSocket] Credential manager logged in")
-                                    await self.broadcast_state()
                                 
-                                # 解析任务复杂度更新（在异步上下文中处理）
+                                # 解析任务复杂度更新
                                 complexity_match = re.search(r'任务复杂度更新:\s*(simple|medium|complex|very_complex)', chunk_stripped)
                                 if complexity_match:
                                     new_complexity = complexity_match.group(1)
                                     if new_complexity != self.task_complexity:
                                         self.task_complexity = new_complexity
-                                        await self._broadcast_complexity_update(new_complexity)
+                                        print(f"[WebSocket] Task complexity updated to {new_complexity}")
+                                
+                                # 广播状态更新
+                                await self.broadcast_state()
                                 
                                 if self._is_input_required(chunk_stripped):
                                     await self._handle_input_request(chunk_stripped)
@@ -792,9 +802,26 @@ class AgentStateManager:
             self.command_exit_code = self.command_process.returncode
             self.command_status = "completed" if self.command_exit_code == 0 else "error"
             
-            # 任务结束时重置状态
+            # 同步更新 Agent 状态
+            self.status = "completed" if self.command_exit_code == 0 else "error"
+            
+            # 任务结束时重置所有状态到默认值
             self.credential_manager_logged_in = False
             self.progress_ratio = 0.0
+            self.current_step = 0
+            # 重置显示状态到默认值
+            self.last_action = "Waiting to start..."
+            self.step_description = "Agent is ready"
+            self.task_complexity = "simple"
+            
+            # 重置暂停状态
+            if PAUSE_CONTROLLER_AVAILABLE:
+                try:
+                    controller = get_pause_controller()
+                    controller.reset()
+                    print("[Command] Pause state reset on completion")
+                except:
+                    pass
             
             await self.add_terminal_line(
                 f"[Process finished with exit code: {self.command_exit_code}]",
@@ -878,11 +905,26 @@ class AgentStateManager:
             r'continue\?\s*$',        # continue?
             r'登录后.*跳过',           # 登录后...跳过
             r'按\s*enter\s*跳过',      # 按 Enter 跳过
+            # 人工干预场景 - 检测"按 Enter 键继续"的提示
+            r'按\s*enter\s*键\s*继续',  # 按 Enter 键继续
+            r'完成后.*按.*enter',       # 完成后请按 Enter 键继续
+            r'处理完成后.*按.*enter',   # 处理完成后请按 Enter 键继续
+            r'按\s*enter\s*键\s*跳过',  # 按 Enter 键跳过
         ]
         
         for pattern in input_patterns:
             if re.search(pattern, line_stripped, re.IGNORECASE):
                 return True
+        
+        # 特殊检测：人工干预提示
+        # 当检测到"需要人工干预"相关提示时，检查后续是否有"按 Enter"提示
+        if '需要人工干预' in line_stripped or '人工干预' in line_stripped:
+            return True
+        
+        # 检测进度停滞提示
+        if '进度停滞' in line_stripped and '按' in line_stripped:
+            return True
+        
         return False
     
     async def _handle_input_request(self, prompt_line: str):
@@ -904,6 +946,14 @@ class AgentStateManager:
             prompt_message = "Please enter your username"
         elif '[y/n]' in prompt_line.lower() or '(y/n)' in prompt_line.lower():
             prompt_message = "Please enter Y or N"
+        elif '需要人工干预' in prompt_line or '人工干预' in prompt_line:
+            # 人工干预场景 - 用户需要在浏览器中完成操作后按 Enter
+            prompt_message = "⚠️ Manual intervention required - Press Enter when done"
+            self._current_input_is_password = False
+        elif '进度停滞' in prompt_line:
+            # 进度停滞场景 - 用户确认后继续
+            prompt_message = "⚠️ Progress stagnation detected - Press Enter to continue or type 'exit' to abort"
+            self._current_input_is_password = False
         elif '按' in prompt_line and 'enter' in prompt_line.lower():
             prompt_message = "Press Enter to continue or type input"
         
@@ -918,26 +968,141 @@ class AgentStateManager:
             except Exception as e:
                 self.add_log(f"Failed to write to stdin: {str(e)}", "error")
     
-    def _parse_output_for_status(self, line: str):
+    def _parse_output_for_status(self, line: str) -> bool:
         """
         解析输出以更新 Agent 状态
         
         从 main.py 的输出中提取状态信息
+        同时更新 last_action 和 step_description 以实现实时显示
+        
+        【实际输出格式】
+        - 步骤分隔符: "步骤 6/30" 或 "─────────────── 步骤 6/30 ───────────────"
+        - 决策信息: "🧠 决策: click = '按钮'" 或 "🧠 决策: wait = '2000'"
+        - 感知信息: "👁️ 感知: 20 个元素"
+        - 执行成功: "✅ click (成功)" 或 "✅ wait (2.0s)"
+        - 执行警告: "⚠️ 检测到弹窗/模态框"
+        - 进度信息: "📊 进度: 88% | 停滞: 1/5"
+        
+        【返回值】
+        True: 状态有重要变化，需要广播
+        False: 无重要变化，不需要广播
         """
-        if '正在启动浏览器' in line or 'Launching browser' in line.lower():
+        # 去除 ANSI 颜色代码
+        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+        
+        # 调试：打印每一行
+        print(f"[Parse] Line: {clean_line[:80]}")
+        
+        # 解析步骤分隔符 - 格式: "步骤 X/Y" 或 "──── 步骤 X/Y ────"
+        step_sep_match = re.search(r'步骤\s*(\d+)\s*/\s*(\d+)', clean_line)
+        if step_sep_match:
+            new_step = int(step_sep_match.group(1))
+            max_steps = int(step_sep_match.group(2))
+            if new_step != self.current_step:
+                self.current_step = new_step
+            if max_steps != self.max_steps:
+                self.max_steps = max_steps
+            # 步骤分隔符只更新步数，不更新 step_description
+            # 让后续的决策/感知信息来更新 step_description
+            print(f"[WebSocket] Step {new_step}/{max_steps}")
+            return True  # 步骤变化需要广播
+        
+        # 解析决策信息 - 格式: "🧠 决策: action → [target_id] = 'value'" 或 "🧠 决策: action = 'value'"
+        # 决策只是计划，不更新 last_action（只有执行成功才更新）
+        # 支持: "决策: click → [123] = 'value'" 或 "决策: type = 'hello'" 或 "决策: wait"
+        decision_match = re.search(r'🧠\s*决策\s*[:：]\s*(\w+)(?:\s*→\s*\[\d+\])?\s*(?:=\s*[\'"]?([^\'"]*)[\'"]?)?', clean_line)
+        if decision_match:
+            action_type = decision_match.group(1)
+            action_value = decision_match.group(2) or ''
+            # 脱敏敏感信息
+            action_lower = action_type.lower() if action_type else ""
+            if action_lower in ("type", "input", "fill") and action_value:
+                masked_value = mask_string(action_value, show_prefix=1, show_suffix=1)
+            else:
+                masked_value = action_value
+            # 只更新 step_description，不更新 last_action
+            if masked_value:
+                self.step_description = f"Planning: {action_type} = {masked_value[:30]}"
+            else:
+                self.step_description = f"Planning: {action_type}"
+            print(f"[WebSocket] Decision: {action_type} = {masked_value}")
+            return True  # 决策变化需要广播
+        
+        # 解析感知信息 - 格式: "👁️ 感知: X 个元素"
+        perception_match = re.search(r'👁️\s*感知\s*[:：]\s*(\d+)', clean_line)
+        if perception_match:
+            elements_count = perception_match.group(1)
+            self.step_description = f"Perceiving page ({elements_count} elements found)"
+            return True  # 感知变化需要广播
+        
+        # 解析执行成功 - 格式: "✅ action" 或 "✅ action (details)"
+        # 括号是可选的，支持 "✅ type" 和 "✅ wait (2.0s)" 两种格式
+        success_match = re.search(r'✅\s*(\w+)(?:\s*\(([^)]*)\))?', clean_line)
+        if success_match:
+            action_type = success_match.group(1)
+            details = success_match.group(2) or ''
+            if details:
+                self.last_action = f"✓ {action_type} ({details[:30]})"
+            else:
+                self.last_action = f"✓ {action_type}"
+            return True  # 执行成功需要广播
+        
+        # 解析执行警告 - 格式: "⚠️ xxx"
+        warning_match = re.search(r'⚠️\s*(.+)', clean_line)
+        if warning_match:
+            warning_text = warning_match.group(1).strip()
+            self.step_description = f"Warning: {warning_text[:80]}"
+            return True  # 警告需要广播
+        
+        # 解析检测信息 - 格式: "🚨 xxx"
+        alert_match = re.search(r'🚨\s*(.+)', clean_line)
+        if alert_match:
+            alert_text = alert_match.group(1).strip()
+            self.step_description = f"Alert: {alert_text[:80]}"
+            return True  # 警报需要广播
+        
+        # 解析截图信息 - 格式: "📸 截图 xxx"
+        screenshot_match = re.search(r'📸\s*截图\s*(?:\([^)]*\))?\s*[:：]?\s*(.+)', clean_line)
+        if screenshot_match:
+            screenshot_info = screenshot_match.group(1).strip()
+            self.step_description = f"Capturing screenshot: {screenshot_info[:50]}"
+            return False  # 截图信息不需要广播（太频繁）
+        
+        # 解析任务完成提示 - 格式: "💡 任务可能已完成"
+        # 注意：只解析特定的任务相关提示，忽略终端初始化提示
+        complete_hint_match = re.search(r'💡\s*(.+)', clean_line)
+        if complete_hint_match:
+            hint_text = complete_hint_match.group(1).strip()
+            print(f"[Parse] 💡 hint detected: {hint_text[:50]}")
+            # 只处理任务相关的提示，忽略终端操作提示
+            if '任务' in hint_text or 'task' in hint_text.lower():
+                self.step_description = f"Hint: {hint_text[:80]}"
+                print(f"[Parse] Updated step_description to: {self.step_description}")
+                return True  # 任务相关提示需要广播
+            # 其他提示（如终端操作提示）不更新状态
+            print(f"[Parse] Ignoring non-task hint")
+            return False
+        
+        # 根据关键词更新状态（保留原有逻辑作为后备）
+        # 注意：这些后备逻辑只在前面没有匹配到的情况下才执行
+        # 重要：不要覆盖已经解析的 last_action（如 ✅ goto）
+        if '正在启动浏览器' in clean_line or 'launching browser' in clean_line.lower():
             self.status = "running"
             self.last_action = "Launching browser"
-        elif '导航到' in line or 'Navigating to' in line.lower():
-            self.last_action = "Navigating..."
-        elif '点击' in line or 'Click' in line.lower():
-            self.last_action = "Clicking element"
-        elif '输入' in line or 'Typing' in line.lower():
-            self.last_action = "Typing text"
-        elif '完成' in line or 'completed' in line.lower():
+            self.step_description = "Initializing browser environment"
+            return True
+        elif '任务完成' in clean_line or 'task completed' in clean_line.lower():
             self.status = "completed"
             self.last_action = "Task completed"
-        elif '错误' in line or 'error' in line.lower():
+            self.step_description = "Task completed successfully"
+            return True
+        elif '❌' in clean_line and ('错误' in clean_line or 'error' in clean_line.lower()):
             self.status = "error"
+            self.last_action = "Error occurred"
+            self.step_description = f"Error: {clean_line[:100]}"
+            return True
+        
+        return False  # 无重要变化
     
     async def _broadcast_complexity_update(self, complexity: str):
         """
@@ -970,8 +1135,25 @@ class AgentStateManager:
                     self.command_process.kill()
                 
                 self.command_status = "stopped"
+                self.status = "stopped"
+                # 重置所有状态到默认值
                 self.credential_manager_logged_in = False
                 self.progress_ratio = 0.0
+                self.current_step = 0
+                # 重置显示状态到默认值
+                self.last_action = "Waiting to start..."
+                self.step_description = "Agent is ready"
+                self.task_complexity = "simple"
+                
+                # 重置暂停状态
+                if PAUSE_CONTROLLER_AVAILABLE:
+                    try:
+                        controller = get_pause_controller()
+                        controller.reset()
+                        print("[Command] Pause state reset on stop")
+                    except:
+                        pass
+                
                 self.add_log("Command stopped by user", "warning")
                 await self.broadcast_command_status()
                 await self.broadcast_state()
@@ -1203,12 +1385,25 @@ async def _async_start_agent():
 
 @app.post("/api/agent/pause")
 async def pause_agent():
-    """暂停 Agent"""
+    """
+    暂停 Agent
+    
+    【工作原理】
+    1. 通过 PauseController 写入暂停状态文件
+    2. Agent 子进程在每个步骤开始时检查该文件
+    3. 如果检测到暂停状态，Agent 会阻塞等待
+    """
     if agent_state.status != "running":
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": "Agent is not running"}
         )
+    
+    # 使用 PauseController 写入暂停状态（进程间通信）
+    if PAUSE_CONTROLLER_AVAILABLE:
+        controller = get_pause_controller()
+        controller.pause()
+        print("[API] Pause signal sent via PauseController")
     
     agent_state.status = "paused"
     agent_state.last_action = "Agent paused"
@@ -1225,12 +1420,24 @@ async def pause_agent():
 
 @app.post("/api/agent/resume")
 async def resume_agent():
-    """恢复 Agent"""
+    """
+    恢复 Agent
+    
+    【工作原理】
+    1. 通过 PauseController 清除暂停状态
+    2. Agent 子进程检测到状态变化后继续执行
+    """
     if agent_state.status != "paused":
         return JSONResponse(
             status_code=400,
             content={"success": False, "message": "Agent is not paused"}
         )
+    
+    # 使用 PauseController 清除暂停状态（进程间通信）
+    if PAUSE_CONTROLLER_AVAILABLE:
+        controller = get_pause_controller()
+        controller.resume()
+        print("[API] Resume signal sent via PauseController")
     
     agent_state.status = "running"
     agent_state.last_action = "Agent resumed"
@@ -1254,6 +1461,12 @@ async def stop_agent():
             content={"success": False, "message": "Agent is not running"}
         )
     
+    # 重置暂停状态（防止下次运行时意外暂停）
+    if PAUSE_CONTROLLER_AVAILABLE:
+        controller = get_pause_controller()
+        controller.reset()
+        print("[API] Pause state reset on stop")
+    
     # 停止截图流
     await agent_state.stop_screenshot_stream()
     
@@ -1261,7 +1474,12 @@ async def stop_agent():
     await agent_state.close_browser()
     
     agent_state.status = "stopped"
-    agent_state.last_action = "Agent stopped"
+    # 重置显示状态到默认值
+    agent_state.last_action = "Waiting to start..."
+    agent_state.step_description = "Agent is ready"
+    agent_state.current_step = 0
+    agent_state.progress_ratio = 0.0
+    agent_state.task_complexity = "simple"
     agent_state.add_log("Agent stopped by user", "warning")
     
     await agent_state.broadcast_state()
@@ -1276,12 +1494,19 @@ async def stop_agent():
 @app.post("/api/agent/reset")
 async def reset_agent():
     """重置 Agent"""
+    # 重置暂停状态（防止下次运行时意外暂停）
+    if PAUSE_CONTROLLER_AVAILABLE:
+        controller = get_pause_controller()
+        controller.reset()
+        print("[API] Pause state reset on reset")
+    
     # 停止截图流
     await agent_state.stop_screenshot_stream()
     
     # 关闭浏览器
     await agent_state.close_browser()
     
+    # 重置所有状态到默认值
     agent_state.status = "idle"
     agent_state.current_step = 0
     agent_state.last_action = "Waiting to start..."
@@ -1290,6 +1515,9 @@ async def reset_agent():
     agent_state.current_url = ""
     agent_state.logs = []
     agent_state.latest_screenshot = None
+    agent_state.progress_ratio = 0.0
+    agent_state.task_complexity = "simple"
+    agent_state.credential_manager_logged_in = False
     
     agent_state.add_log("Agent reset", "info")
     
@@ -2027,9 +2255,16 @@ async def websocket_endpoint(websocket: WebSocket):
 # ================================================================================
 
 async def auto_execute_agent():
-    """自动执行 Agent 任务（模拟执行）"""
+    """
+    自动执行 Agent 任务（模拟执行）
+    
+    【注意】此函数仅用于 /api/agent/start 端点的模拟执行
+    当使用 /api/command/execute 端点时，不会启动此函数
+    """
     while True:
-        if agent_state.status == "running":
+        # 只有在 command_status 不是 running 时才执行模拟
+        # 这样可以避免与 execute_main_py 的冲突
+        if agent_state.status == "running" and agent_state.command_status != "running":
             # 检查是否已完成
             if agent_state.current_step >= agent_state.max_steps:
                 await asyncio.sleep(0.5)
@@ -2038,6 +2273,10 @@ async def auto_execute_agent():
             await asyncio.sleep(2)
             
             if agent_state.status != "running":
+                continue
+            
+            # 再次检查 command_status，确保没有真正的命令在执行
+            if agent_state.command_status == "running":
                 continue
             
             agent_state.current_step += 1

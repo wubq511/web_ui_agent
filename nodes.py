@@ -87,6 +87,12 @@ except ImportError:
     HAS_CREDENTIAL_MANAGER = False
     CredentialManager = None
 
+try:
+    from pause_controller import check_and_wait, is_paused
+    HAS_PAUSE_CONTROLLER = True
+except ImportError:
+    HAS_PAUSE_CONTROLLER = False
+
 
 SYSTEM_PROMPT = """你是一个专业的网页操作助手(web-ui-agent)。你的任务是分析当前网页状态，决定下一步操作来完成用户目标。
 
@@ -1937,6 +1943,7 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
             priority = "normal"
             
             nonlocal popup_detected, login_form_detected, login_elements, mask_detected
+            nonlocal need_manual_intervention, manual_intervention_reason, captcha_detected, sms_code_input_detected
             
             # 如果检测到遮罩层，检查元素是否可能在弹窗内
             if mask_detected:
@@ -2206,7 +2213,10 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
     _perf_duration = (time.perf_counter() - _perf_start) * 1000
     get_performance_monitor().record("perception", _perf_duration, {"elements": len(elements_dict)})
     
-    return {
+    # 先合并 pending_updates，再设置人工干预相关字段
+    # 这样可以确保人工干预标记不会被 pending_updates 覆盖
+    result = {
+        **pending_updates,
         "elements_dict": elements_dict,
         "current_url": current_url,
         "error_message": None,
@@ -2221,8 +2231,9 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
         "manual_intervention_reason": manual_intervention_reason,
         "captcha_detected": captcha_detected,
         "sms_code_input_detected": sms_code_input_detected,
-        **pending_updates
     }
+    
+    return result
 
 
 def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) -> dict:
@@ -2251,6 +2262,9 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
     captcha_detected = state.get("captcha_detected", False)
     sms_code_input_detected = state.get("sms_code_input_detected", False)
     
+    # 标记是否需要重置人工干预状态（用于最后的返回）
+    should_reset_manual_intervention = False
+    
     if need_manual_intervention:
         print("\n" + "="*60)
         print("⚠️  检测到需要人工干预的情况！")
@@ -2271,18 +2285,20 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
         try:
             input()
             print("✅ 用户已确认，继续执行任务...")
+            # 标记需要重置
+            should_reset_manual_intervention = True
         except KeyboardInterrupt:
             print("\n🛑 用户请求终止任务")
             return {
                 "history": state["history"],
                 "error_message": "用户终止任务",
                 "is_done": True,
-                "termination_reason": "user_abort"
+                "termination_reason": "user_abort",
+                "need_manual_intervention": False,
+                "manual_intervention_reason": [],
+                "captcha_detected": False,
+                "sms_code_input_detected": False
             }
-        
-        # 重置标记
-        need_manual_intervention = False
-        manual_intervention_reason = []
     
     # 检查进度停滞是否达到阈值
     stagnation_count = state.get("stagnation_count", 0)
@@ -2687,11 +2703,21 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
             "result": "待执行"
         }
         
-        return {
+        # 构建返回状态，包含所有需要更新的字段
+        result = {
             "history": state["history"] + [history_entry],
             "current_decision": decision,
             "error_message": None
         }
+        
+        # 如果之前处理了人工干预，确保在返回时重置标记
+        if should_reset_manual_intervention:
+            result["need_manual_intervention"] = False
+            result["manual_intervention_reason"] = []
+            result["captcha_detected"] = False
+            result["sms_code_input_detected"] = False
+        
+        return result
         
     except Exception as e:
         error_str = str(e).lower()
@@ -3545,6 +3571,10 @@ def should_continue(state: AgentState, context: AgentContext) -> str:
     【返回值】
     str: 下一个节点的名称
     """
+    # 检查暂停状态 - 在每个步骤开始时检查
+    if HAS_PAUSE_CONTROLLER:
+        check_and_wait(f"[步骤 {state['step_count']}]")
+    
     context.process_user_commands()
     
     if context.user_interaction.is_aborted():

@@ -42,8 +42,9 @@ const MainContent: React.FC = () => {
   const { isConnected } = useWebSocket();
   const { state: controlState } = useControl();
   
-  // 判断是否处于运行状态（运行中或暂停）
-  const isRunning = controlState.status === 'running' || controlState.status === 'paused';
+  // 判断是否显示扩展终端模式
+  // 只有 idle 和 stopped 状态才隐藏终端，其他状态（running、paused、error、completed）都保持显示
+  const showTerminal = controlState.status !== 'idle' && controlState.status !== 'stopped';
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800">
@@ -94,7 +95,7 @@ const MainContent: React.FC = () => {
             {/* 文件面板 - 非运行状态显示 */}
             <div 
               className={`absolute inset-0 transition-opacity duration-200 ease-out ${
-                isRunning ? 'opacity-0 pointer-events-none' : 'opacity-100'
+                showTerminal ? 'opacity-0 pointer-events-none' : 'opacity-100'
               }`}
             >
               <FilePanel />
@@ -103,7 +104,7 @@ const MainContent: React.FC = () => {
             {/* 终端面板 - 运行状态显示 */}
             <div 
               className={`absolute inset-0 transition-opacity duration-200 ease-out ${
-                isRunning ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                showTerminal ? 'opacity-100' : 'opacity-0 pointer-events-none'
               }`}
             >
               <div className="glass rounded-xl border border-white/10 h-full overflow-hidden">

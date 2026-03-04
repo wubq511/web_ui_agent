@@ -85,6 +85,9 @@ export function useWebSocket() {
       type: 'SET_STATUS',
       payload: status.status as 'idle' | 'running' | 'paused' | 'stopped' | 'completed' | 'error',
     });
+    
+    // 注意：不再在这里重置状态，让 handleCommandStatus 和 handleStateUpdate 来处理
+    // 状态重置逻辑已移到 handleCommandStatus 中
   }, [controlDispatch]);
 
   /**
@@ -104,6 +107,9 @@ export function useWebSocket() {
 
   /**
    * 处理命令状态消息
+   * 
+   * 【功能增强】
+   * 当命令完成、停止或出错时，重置 Agent 状态到默认值
    */
   const handleCommandStatus = useCallback((data: { 
     status: string; 
@@ -129,11 +135,33 @@ export function useWebSocket() {
       addLog(`Command completed with exit code: ${data.exit_code}`, data.exit_code === 0 ? 'success' : 'error');
       setProcessing(false);
       setWaitingForInput(false, '');
+      // 重置 Agent 状态到默认值
+      agentDispatch({ 
+        type: 'UPDATE_STATE', 
+        payload: {
+          lastAction: 'Waiting to start...',
+          stepDescription: 'Agent is ready',
+          currentStep: 0,
+          progressRatio: 0,
+          taskComplexity: 'simple',
+        }
+      });
     } else if (data.status === 'error') {
       controlDispatch({ type: 'SET_STATUS', payload: 'error' });
       addLog('Command execution failed', 'error');
       setProcessing(false);
       setWaitingForInput(false, '');
+      // 重置 Agent 状态到默认值
+      agentDispatch({ 
+        type: 'UPDATE_STATE', 
+        payload: {
+          lastAction: 'Waiting to start...',
+          stepDescription: 'Agent is ready',
+          currentStep: 0,
+          progressRatio: 0,
+          taskComplexity: 'simple',
+        }
+      });
     } else if (data.status === 'running') {
       controlDispatch({ type: 'SET_STATUS', payload: 'running' });
       setProcessing(true);
@@ -142,8 +170,19 @@ export function useWebSocket() {
       addLog('Command stopped', 'warning');
       setProcessing(false);
       setWaitingForInput(false, '');
+      // 重置 Agent 状态到默认值
+      agentDispatch({ 
+        type: 'UPDATE_STATE', 
+        payload: {
+          lastAction: 'Waiting to start...',
+          stepDescription: 'Agent is ready',
+          currentStep: 0,
+          progressRatio: 0,
+          taskComplexity: 'simple',
+        }
+      });
     }
-  }, [controlDispatch, addLog, setProcessing, setWaitingForInput]);
+  }, [controlDispatch, addLog, setProcessing, setWaitingForInput, agentDispatch]);
 
   /**
    * 处理连接状态变化

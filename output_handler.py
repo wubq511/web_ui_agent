@@ -36,14 +36,16 @@ from task_manager import get_current_task_id
 
 
 SENSITIVE_VALUE_FIELDS = {"password", "pwd", "passwd", "secret", "token", "api_key", "key"}
+SENSITIVE_ACTION_TYPES = {"type", "input", "fill", "enter"}
 
 
-def mask_sensitive_in_dict(data: dict) -> dict:
+def mask_sensitive_in_dict(data: dict, parent_action_type: str = None) -> dict:
     """
     递归脱敏字典中的敏感信息
     
     【参数】
     data: 原始字典
+    parent_action_type: 父级的 action_type（用于判断 value 是否需要脱敏）
     
     【返回值】
     脱敏后的字典副本
@@ -51,20 +53,27 @@ def mask_sensitive_in_dict(data: dict) -> dict:
     if not isinstance(data, dict):
         return data
     
+    action_type = data.get("action_type", parent_action_type)
+    
     result = {}
     for key, value in data.items():
         key_lower = key.lower() if isinstance(key, str) else ""
         
         if isinstance(value, str):
             if is_sensitive_field(key) or any(s in key_lower for s in SENSITIVE_VALUE_FIELDS):
+                if key_lower == "value" and action_type and action_type.lower() not in SENSITIVE_ACTION_TYPES:
+                    result[key] = value
+                else:
+                    result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            elif len(value) > 10 and any(s in value.lower() for s in ["password", "密码"]):
                 result[key] = mask_string(value, show_prefix=1, show_suffix=1)
             else:
                 result[key] = value
         elif isinstance(value, dict):
-            result[key] = mask_sensitive_in_dict(value)
+            result[key] = mask_sensitive_in_dict(value, action_type)
         elif isinstance(value, list):
             result[key] = [
-                mask_sensitive_in_dict(item) if isinstance(item, dict) else item
+                mask_sensitive_in_dict(item, action_type) if isinstance(item, dict) else item
                 for item in value
             ]
         else:
@@ -75,20 +84,29 @@ def mask_sensitive_in_dict(data: dict) -> dict:
 
 def mask_password_in_thought(thought: str) -> str:
     """
-    脱敏思考过程中的密码信息
+    脱敏思考过程中的密码信息（智能识别真正的密码值）
     
     【参数】
     thought: 原始思考文本
     
     【返回值】
     脱敏后的文本
+    
+    【设计思路】
+    只脱敏真正的密码值，不脱敏描述性文本如"密码输入框"、"输入密码"等
+    真正的密码通常格式为：
+    - 密码：'xxx' 或 密码："xxx" 或 密码=xxx
+    - password='xxx' 或 password: "xxx"
     """
     import re
     
     patterns = [
-        (r"(密码[是为：:'\"\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
-        (r"(password[=:\\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
-        (r"(pwd[=:\\s]*['\"]?)([^'\"\s,，。！！?？]{4,})", r"\1******"),
+        (r"(密码[：:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
+        (r"(密码[：:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
+        (r"(password\s*[=:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
+        (r"(password\s*[=:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
+        (r"(pwd\s*[=:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
+        (r"(pwd\s*[=:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
     ]
     
     result = thought

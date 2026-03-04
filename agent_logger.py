@@ -190,7 +190,7 @@ class AgentLogger:
         self._logger.info(f"📍 步骤 {step} 开始: {action_type}")
     
     def log_step(self, step_log: StepLog):
-        """记录步骤执行"""
+        """记录步骤执行（自动脱敏敏感信息）"""
         self._step_logs.append(step_log)
         
         self._logger.debug(
@@ -198,12 +198,14 @@ class AgentLogger:
             f"[{step_log.duration_ms:.0f}ms]"
         )
         if step_log.thought:
-            self._logger.debug(f"   思考: {step_log.thought[:100]}")
+            masked_thought = sanitize_log_message(step_log.thought[:100])
+            self._logger.debug(f"   思考: {masked_thought}")
         if step_log.result:
-            self._logger.debug(f"   结果: {step_log.result[:100]}")
+            masked_result = sanitize_log_message(step_log.result[:100])
+            self._logger.debug(f"   结果: {masked_result}")
     
     def log_decision(self, decision_log: DecisionLog):
-        """记录决策过程"""
+        """记录决策过程（自动脱敏敏感信息）"""
         self._decision_logs.append(decision_log)
         
         self._logger.debug(
