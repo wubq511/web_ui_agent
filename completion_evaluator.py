@@ -246,6 +246,7 @@ class CompletionEvaluator:
         【修复说明】
         - 权重调整为0.35，确保权重总和为1.0
         - done动作检测移到函数开头，优先判断
+        - 新增summarize动作检测，浏览任务中summarize表示接近完成
         """
         done_actions = [e for e in history if e.get("action_type") == "done"]
         if done_actions:
@@ -254,6 +255,15 @@ class CompletionEvaluator:
                 weight=0.35,
                 value=1.0,
                 description="检测到done动作，任务已完成"
+            )
+        
+        summarize_actions = [e for e in history if e.get("action_type") == "summarize"]
+        if summarize_actions:
+            return ProgressIndicator(
+                name="goal_progress",
+                weight=0.35,
+                value=0.85,
+                description=f"检测到summarize动作({len(summarize_actions)}次)，浏览任务接近完成"
             )
         
         keywords = self.extract_keywords(objective)
@@ -296,6 +306,7 @@ class CompletionEvaluator:
         
         【修复说明】
         - 权重调整为0.25（保持不变）
+        - summarize 操作视为有效进展
         """
         if not history:
             return ProgressIndicator(
@@ -310,7 +321,11 @@ class CompletionEvaluator:
         
         for entry in history:
             result = entry.get("result", "").lower()
-            if "成功" in result or "success" in result or "完成" in result:
+            action_type = entry.get("action_type", "").lower()
+            
+            if action_type == "summarize":
+                successful_actions += 1
+            elif "成功" in result or "success" in result or "完成" in result:
                 successful_actions += 1
             elif "错误" in result or "error" in result or "失败" in result:
                 pass
@@ -505,6 +520,21 @@ class CompletionEvaluator:
                 recommendation="检测到done动作，任务已完成",
                 task_complexity=self.task_complexity,
                 progress_level=ProgressLevel.FULL_PROGRESS,
+                adjusted_stagnation_threshold=stagnation_threshold or default_threshold
+            )
+        
+        summarize_actions = [e for e in history if e.get("action_type") == "summarize"]
+        if summarize_actions:
+            self.stagnation_count = 0
+            return CompletionAssessment(
+                status=CompletionStatus.LIKELY_COMPLETE,
+                confidence=0.85,
+                progress_ratio=0.85,
+                indicators=[],
+                stagnation_count=0,
+                recommendation=f"检测到summarize动作({len(summarize_actions)}次)，浏览任务接近完成，建议执行done结束",
+                task_complexity=self.task_complexity,
+                progress_level=ProgressLevel.SIGNIFICANT_PROGRESS,
                 adjusted_stagnation_threshold=stagnation_threshold or default_threshold
             )
         

@@ -150,12 +150,20 @@ class WebUIAgent:
         初始化浏览器
 
         【设计思路】
-        使用 Playwright 的同步 API 启动浏览器。我们设置：
-        1. headless=False - 显示浏览器窗口，便于观察执行过程
-        2. slow_mo - 减慢操作速度，便于观察
-        3. storage_state - 恢复浏览器会话状态（cookies、localStorage等）
-        4. stealth_sync - 应用 playwright-stealth 反检测补丁
-        5. args - 添加浏览器启动参数，进一步隐藏自动化特征
+        支持两种浏览器模式：
+        
+        1. 本地 Chrome 模式（推荐）：
+           - 通过 CDP 连接到已运行的本地 Chrome
+           - 直接使用已有的 context 和 page（非隐身模式）
+           - 不注入反检测脚本（使用真实浏览器指纹）
+           - 保留登录状态、cookies 等用户数据
+        
+        2. Playwright Chromium 模式：
+           - headless=False - 显示浏览器窗口，便于观察执行过程
+           - slow_mo - 减慢操作速度，便于观察
+           - storage_state - 恢复浏览器会话状态（cookies、localStorage等）
+           - 注入反检测脚本 - 隐藏自动化特征
+           - args - 添加浏览器启动参数
         """
         print("🌐 正在启动浏览器...")
 
@@ -221,13 +229,13 @@ class WebUIAgent:
 
         # 尝试连接本地 Chrome（如果可用）
         # 本地 Chrome 更难被检测，因为它有真实的用户数据
+        use_local_chrome = False
         try:
             # 先尝试连接已运行的 Chrome 远程调试端口
             self.browser = self.playwright.chromium.connect_over_cdp("http://localhost:9222")
             print("✅ 已连接到本地 Chrome（远程调试模式）")
             use_local_chrome = True
         except Exception:
-            use_local_chrome = False
             # 如果没有本地 Chrome，使用 Playwright 的 Chromium
             self.browser = self.playwright.chromium.launch(
                 headless=False,
@@ -238,393 +246,421 @@ class WebUIAgent:
             print("   启动本地 Chrome 命令：")
             print(r'   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_dev_profile"')
 
-        # 创建浏览器上下文，设置更真实的用户代理和视口
-        # 使用真实的 Chrome User-Agent
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        # ==================== 本地 Chrome 模式 ====================
+        # 直接使用已有的 context 和 page，不创建新的（避免隐身模式）
+        if use_local_chrome:
+            # 获取本地 Chrome 已有的上下文
+            contexts = self.browser.contexts
+            if contexts:
+                # 使用已有的 context（保留登录状态、cookies 等）
+                self.browser_context = contexts[0]
+                print("📌 使用本地 Chrome 已有的浏览器上下文（非隐身模式）")
+                
+                # 获取已有的页面
+                pages = self.browser_context.pages
+                if pages:
+                    # 使用最后一个（最新）页面
+                    self.page = pages[-1]
+                    print(f"📌 使用已有页面: {self.page.url if self.page.url else 'about:blank'}")
+                else:
+                    # 如果没有页面，创建一个新页面
+                    self.page = self.browser_context.new_page()
+                    print("📌 创建新页面")
+            else:
+                # 极少数情况：没有 context，创建一个新的
+                self.browser_context = self.browser.new_context()
+                self.page = self.browser_context.new_page()
+                print("📌 创建新的浏览器上下文和页面")
+            
+            # 本地 Chrome 不注入反检测脚本，因为它已经是真实浏览器
+            print("🛡️ 本地 Chrome 模式：不注入反检测脚本（使用真实浏览器指纹）")
+        
+        # ==================== Playwright Chromium 模式 ====================
+        # 保持原有逻辑：创建新的 context 和 page，注入反检测脚本
+        else:
+            # 创建浏览器上下文，设置更真实的用户代理和视口
+            # 使用真实的 Chrome User-Agent
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-        context_options = {
-            'viewport': {'width': 1920, 'height': 1080},
-            'user_agent': user_agent,
-            'locale': 'zh-CN',
-            'timezone_id': 'Asia/Shanghai',
-            'geolocation': {'latitude': 31.2304, 'longitude': 121.4737},  # 上海坐标
-            'permissions': ['geolocation'],
-            'color_scheme': 'light',
-            # 添加额外的 HTTP 头来模拟真实浏览器
-            'extra_http_headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'max-age=0',
-                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1',
-            }
-        }
-
-        if storage_state:
-            print("🔄 正在恢复浏览器会话状态...")
-            context_options['storage_state'] = storage_state
-
-        self.browser_context = self.browser.new_context(**context_options)
-
-        # 添加反检测脚本 - 隐藏自动化特征
-        # 这些脚本会在每个页面加载时自动执行
-        self.browser_context.add_init_script("""
-            // ==================== 基础反检测 ====================
-            // 覆盖 navigator.webdriver 属性
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-
-            // 删除 webdriver 相关的属性
-            delete navigator.__proto__.webdriver;
-
-            // 覆盖 chrome 对象
-            window.chrome = {
-                runtime: {
-                    OnInstalledReason: {CHROME_UPDATE: "chrome_update", INSTALL: "install", SHARED_MODULE_UPDATE: "shared_module_update", UPDATE: "update"},
-                    OnRestartRequiredReason: {APP_UPDATE: "app_update", OS_UPDATE: "os_update", PERIODIC: "periodic"},
-                    PlatformArch: {ARM: "arm", ARM64: "arm64", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", X86_32: "x86-32", X86_64: "x86-64"},
-                    PlatformNaclArch: {ARM: "arm", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", MIPSEL64: "mipsel64", X86_32: "x86-32", X86_64: "x86-64"},
-                    PlatformOs: {ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win"},
-                    RequestUpdateCheckStatus: {NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available"}
-                },
-                loadTimes: function() {
-                    return {
-                        commitLoadTime: performance.now() / 1000,
-                        connectionInfo: "h2",
-                        finishDocumentLoadTime: performance.now() / 1000,
-                        finishLoadTime: performance.now() / 1000,
-                        firstPaintAfterLoadTime: 0,
-                        firstPaintTime: performance.now() / 1000,
-                        navigationType: "Other",
-                        npnNegotiatedProtocol: "h2",
-                        requestTime: performance.now() / 1000,
-                        startLoadTime: performance.now() / 1000,
-                        wasAlternateProtocolAvailable: false,
-                        wasFetchedViaSpdy: true,
-                        wasNpnNegotiated: true
-                    };
-                },
-                csi: function() {
-                    return {
-                        onloadT: Date.now(),
-                        pageT: performance.now(),
-                        startE: performance.timing.navigationStart,
-                        tran: 15
-                    };
-                },
-                app: {
-                    isInstalled: false,
-                    InstallState: {DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed"},
-                    RunningState: {CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running"}
+            context_options = {
+                'viewport': {'width': 1920, 'height': 1080},
+                'user_agent': user_agent,
+                'locale': 'zh-CN',
+                'timezone_id': 'Asia/Shanghai',
+                'geolocation': {'latitude': 31.2304, 'longitude': 121.4737},  # 上海坐标
+                'permissions': ['geolocation'],
+                'color_scheme': 'light',
+                # 添加额外的 HTTP 头来模拟真实浏览器
+                'extra_http_headers': {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'max-age=0',
+                    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1',
                 }
-            };
+            }
 
-            // ==================== 插件模拟 ====================
-            // 覆盖 navigator.plugins，使其看起来像有真实插件
-            const createFakePlugins = () => {
-                const plugins = [
-                    {
-                        0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: null},
-                        description: "Portable Document Format",
-                        filename: "internal-pdf-viewer",
-                        length: 1,
-                        name: "Chrome PDF Plugin",
-                        item: function() { return this[0]; },
-                        namedItem: function() { return null; }
+            if storage_state:
+                print("🔄 正在恢复浏览器会话状态...")
+                context_options['storage_state'] = storage_state
+
+            self.browser_context = self.browser.new_context(**context_options)
+
+            # 添加反检测脚本 - 隐藏自动化特征
+            # 这些脚本会在每个页面加载时自动执行
+            self.browser_context.add_init_script("""
+                // ==================== 基础反检测 ====================
+                // 覆盖 navigator.webdriver 属性
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+
+                // 删除 webdriver 相关的属性
+                delete navigator.__proto__.webdriver;
+
+                // 覆盖 chrome 对象
+                window.chrome = {
+                    runtime: {
+                        OnInstalledReason: {CHROME_UPDATE: "chrome_update", INSTALL: "install", SHARED_MODULE_UPDATE: "shared_module_update", UPDATE: "update"},
+                        OnRestartRequiredReason: {APP_UPDATE: "app_update", OS_UPDATE: "os_update", PERIODIC: "periodic"},
+                        PlatformArch: {ARM: "arm", ARM64: "arm64", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", X86_32: "x86-32", X86_64: "x86-64"},
+                        PlatformNaclArch: {ARM: "arm", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", MIPSEL64: "mipsel64", X86_32: "x86-32", X86_64: "x86-64"},
+                        PlatformOs: {ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win"},
+                        RequestUpdateCheckStatus: {NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available"}
                     },
-                    {
-                        0: {type: "application/pdf", suffixes: "pdf", description: "", enabledPlugin: null},
-                        description: "",
-                        filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
-                        length: 1,
-                        name: "Chrome PDF Viewer",
-                        item: function() { return this[0]; },
-                        namedItem: function() { return null; }
+                    loadTimes: function() {
+                        return {
+                            commitLoadTime: performance.now() / 1000,
+                            connectionInfo: "h2",
+                            finishDocumentLoadTime: performance.now() / 1000,
+                            finishLoadTime: performance.now() / 1000,
+                            firstPaintAfterLoadTime: 0,
+                            firstPaintTime: performance.now() / 1000,
+                            navigationType: "Other",
+                            npnNegotiatedProtocol: "h2",
+                            requestTime: performance.now() / 1000,
+                            startLoadTime: performance.now() / 1000,
+                            wasAlternateProtocolAvailable: false,
+                            wasFetchedViaSpdy: true,
+                            wasNpnNegotiated: true
+                        };
                     },
-                    {
-                        0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: null},
-                        description: "Portable Document Format",
-                        filename: "internal-pdf-viewer2",
-                        length: 1,
-                        name: "Native Client",
-                        item: function() { return this[0]; },
-                        namedItem: function() { return null; }
+                    csi: function() {
+                        return {
+                            onloadT: Date.now(),
+                            pageT: performance.now(),
+                            startE: performance.timing.navigationStart,
+                            tran: 15
+                        };
+                    },
+                    app: {
+                        isInstalled: false,
+                        InstallState: {DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed"},
+                        RunningState: {CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running"}
                     }
-                ];
-                plugins.length = 3;
-                plugins.item = function(index) { return this[index] || null; };
-                plugins.namedItem = function(name) {
-                    for (let i = 0; i < this.length; i++) {
-                        if (this[i].name === name) return this[i];
-                    }
-                    return null;
                 };
-                plugins.refresh = function() {};
-                return plugins;
-            };
 
-            Object.defineProperty(navigator, 'plugins', {
-                get: createFakePlugins
-            });
-
-            // 覆盖 navigator.mimeTypes
-            Object.defineProperty(navigator, 'mimeTypes', {
-                get: () => {
-                    const mimeTypes = [
-                        {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: navigator.plugins[1]},
-                        {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: navigator.plugins[0]},
-                        {type: "application/x-nacl", suffixes: "", description: "Native Client module", enabledPlugin: navigator.plugins[2]},
-                        {type: "application/x-pnacl", suffixes: "", description: "Portable Native Client module", enabledPlugin: navigator.plugins[2]}
+                // ==================== 插件模拟 ====================
+                // 覆盖 navigator.plugins，使其看起来像有真实插件
+                const createFakePlugins = () => {
+                    const plugins = [
+                        {
+                            0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: null},
+                            description: "Portable Document Format",
+                            filename: "internal-pdf-viewer",
+                            length: 1,
+                            name: "Chrome PDF Plugin",
+                            item: function() { return this[0]; },
+                            namedItem: function() { return null; }
+                        },
+                        {
+                            0: {type: "application/pdf", suffixes: "pdf", description: "", enabledPlugin: null},
+                            description: "",
+                            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+                            length: 1,
+                            name: "Chrome PDF Viewer",
+                            item: function() { return this[0]; },
+                            namedItem: function() { return null; }
+                        },
+                        {
+                            0: {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: null},
+                            description: "Portable Document Format",
+                            filename: "internal-pdf-viewer2",
+                            length: 1,
+                            name: "Native Client",
+                            item: function() { return this[0]; },
+                            namedItem: function() { return null; }
+                        }
                     ];
-                    mimeTypes.length = 4;
-                    mimeTypes.item = function(index) { return this[index] || null; };
-                    mimeTypes.namedItem = function(name) {
+                    plugins.length = 3;
+                    plugins.item = function(index) { return this[index] || null; };
+                    plugins.namedItem = function(name) {
                         for (let i = 0; i < this.length; i++) {
-                            if (this[i].type === name) return this[i];
+                            if (this[i].name === name) return this[i];
                         }
                         return null;
                     };
-                    return mimeTypes;
-                }
-            });
-
-            // ==================== 语言和地区 ====================
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['zh-CN', 'zh', 'en-US', 'en']
-            });
-
-            Object.defineProperty(navigator, 'language', {
-                get: () => 'zh-CN'
-            });
-
-            // ==================== 硬件信息 ====================
-            Object.defineProperty(navigator, 'hardwareConcurrency', {
-                get: () => 8
-            });
-
-            Object.defineProperty(navigator, 'deviceMemory', {
-                get: () => 8
-            });
-
-            Object.defineProperty(navigator, 'maxTouchPoints', {
-                get: () => 0
-            });
-
-            // ==================== 平台和用户代理 ====================
-            Object.defineProperty(navigator, 'platform', {
-                get: () => 'Win32'
-            });
-
-            Object.defineProperty(navigator, 'vendor', {
-                get: () => 'Google Inc.'
-            });
-
-            Object.defineProperty(navigator, 'product', {
-                get: () => 'Gecko'
-            });
-
-            Object.defineProperty(navigator, 'productSub', {
-                get: () => '20030107'
-            });
-
-            // ==================== 权限和通知 ====================
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => {
-                if (parameters.name === 'notifications') {
-                    return Promise.resolve({ state: 'default', onchange: null });
-                }
-                if (parameters.name === 'clipboard-read' || parameters.name === 'clipboard-write') {
-                    return Promise.resolve({ state: 'prompt', onchange: null });
-                }
-                return originalQuery(parameters);
-            };
-
-            Object.defineProperty(Notification, 'permission', {
-                get: () => 'default'
-            });
-
-            // ==================== WebGL 反检测 ====================
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                const params = {
-                    37445: 'Intel Inc.',
-                    37446: 'Intel Iris OpenGL Engine',
-                    7937: 'Intel Iris OpenGL Engine',
-                    7936: 'Intel Inc.',
-                    33901: new Float32Array([1, 1024]),
-                    33902: new Float32Array([1, 1024]),
-                    34047: new Float32Array([0.00392156862745098, 0.00392156862745098, 0.00392156862745098, 0.00392156862745098]),
-                    36349: 32,
-                    36348: 32,
-                    35661: 16,
-                    36347: 4096,
-                    34076: 16384,
-                    34930: 8,
-                    3379: 16384,
-                    34024: 16384,
-                    3386: new Int32Array([32767, 32767]),
-                    3410: 2,
-                    3411: 8,
-                    3412: 8,
-                    3413: 8,
-                    3414: 24,
-                    3415: 0,
-                    3416: 16
+                    plugins.refresh = function() {};
+                    return plugins;
                 };
-                if (parameter in params) {
-                    return params[parameter];
-                }
-                return getParameter.call(this, parameter);
-            };
 
-            // 覆盖 getShaderPrecisionFormat
-            const getShaderPrecisionFormat = WebGLRenderingContext.prototype.getShaderPrecisionFormat;
-            WebGLRenderingContext.prototype.getShaderPrecisionFormat = function(shaderType, precisionType) {
-                return {
-                    precision: 23,
-                    rangeMin: 127,
-                    rangeMax: 127
+                Object.defineProperty(navigator, 'plugins', {
+                    get: createFakePlugins
+                });
+
+                // 覆盖 navigator.mimeTypes
+                Object.defineProperty(navigator, 'mimeTypes', {
+                    get: () => {
+                        const mimeTypes = [
+                            {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: navigator.plugins[1]},
+                            {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: navigator.plugins[0]},
+                            {type: "application/x-nacl", suffixes: "", description: "Native Client module", enabledPlugin: navigator.plugins[2]},
+                            {type: "application/x-pnacl", suffixes: "", description: "Portable Native Client module", enabledPlugin: navigator.plugins[2]}
+                        ];
+                        mimeTypes.length = 4;
+                        mimeTypes.item = function(index) { return this[index] || null; };
+                        mimeTypes.namedItem = function(name) {
+                            for (let i = 0; i < this.length; i++) {
+                                if (this[i].type === name) return this[i];
+                            }
+                            return null;
+                        };
+                        return mimeTypes;
+                    }
+                });
+
+                // ==================== 语言和地区 ====================
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['zh-CN', 'zh', 'en-US', 'en']
+                });
+
+                Object.defineProperty(navigator, 'language', {
+                    get: () => 'zh-CN'
+                });
+
+                // ==================== 硬件信息 ====================
+                Object.defineProperty(navigator, 'hardwareConcurrency', {
+                    get: () => 8
+                });
+
+                Object.defineProperty(navigator, 'deviceMemory', {
+                    get: () => 8
+                });
+
+                Object.defineProperty(navigator, 'maxTouchPoints', {
+                    get: () => 0
+                });
+
+                // ==================== 平台和用户代理 ====================
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'Win32'
+                });
+
+                Object.defineProperty(navigator, 'vendor', {
+                    get: () => 'Google Inc.'
+                });
+
+                Object.defineProperty(navigator, 'product', {
+                    get: () => 'Gecko'
+                });
+
+                Object.defineProperty(navigator, 'productSub', {
+                    get: () => '20030107'
+                });
+
+                // ==================== 权限和通知 ====================
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => {
+                    if (parameters.name === 'notifications') {
+                        return Promise.resolve({ state: 'default', onchange: null });
+                    }
+                    if (parameters.name === 'clipboard-read' || parameters.name === 'clipboard-write') {
+                        return Promise.resolve({ state: 'prompt', onchange: null });
+                    }
+                    return originalQuery(parameters);
                 };
-            };
 
-            // ==================== Canvas 反检测 ====================
-            // 添加轻微的噪声到 Canvas 指纹
-            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                Object.defineProperty(Notification, 'permission', {
+                    get: () => 'default'
+                });
 
-            // ==================== 屏幕和窗口 ====================
-            Object.defineProperty(screen, 'colorDepth', {
-                get: () => 24
-            });
+                // ==================== WebGL 反检测 ====================
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    const params = {
+                        37445: 'Intel Inc.',
+                        37446: 'Intel Iris OpenGL Engine',
+                        7937: 'Intel Iris OpenGL Engine',
+                        7936: 'Intel Inc.',
+                        33901: new Float32Array([1, 1024]),
+                        33902: new Float32Array([1, 1024]),
+                        34047: new Float32Array([0.00392156862745098, 0.00392156862745098, 0.00392156862745098, 0.00392156862745098]),
+                        36349: 32,
+                        36348: 32,
+                        35661: 16,
+                        36347: 4096,
+                        34076: 16384,
+                        34930: 8,
+                        3379: 16384,
+                        34024: 16384,
+                        3386: new Int32Array([32767, 32767]),
+                        3410: 2,
+                        3411: 8,
+                        3412: 8,
+                        3413: 8,
+                        3414: 24,
+                        3415: 0,
+                        3416: 16
+                    };
+                    if (parameter in params) {
+                        return params[parameter];
+                    }
+                    return getParameter.call(this, parameter);
+                };
 
-            Object.defineProperty(screen, 'pixelDepth', {
-                get: () => 24
-            });
+                // 覆盖 getShaderPrecisionFormat
+                const getShaderPrecisionFormat = WebGLRenderingContext.prototype.getShaderPrecisionFormat;
+                WebGLRenderingContext.prototype.getShaderPrecisionFormat = function(shaderType, precisionType) {
+                    return {
+                        precision: 23,
+                        rangeMin: 127,
+                        rangeMax: 127
+                    };
+                };
 
-            // ==================== 时区 ====================
-            const originalDate = Date;
-            const originalIntl = Intl;
+                // ==================== Canvas 反检测 ====================
+                // 添加轻微的噪声到 Canvas 指纹
+                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
 
-            // ==================== 插件检测防护 ====================
-            // 防止检测 plugins 的真实性
-            Object.setPrototypeOf(navigator.plugins, PluginArray.prototype);
-            Object.setPrototypeOf(navigator.mimeTypes, MimeTypeArray.prototype);
+                // ==================== 屏幕和窗口 ====================
+                Object.defineProperty(screen, 'colorDepth', {
+                    get: () => 24
+                });
 
-            // ==================== 其他防护 ====================
-            // 防止检测 Function.prototype.toString
-            const originalToString = Function.prototype.toString;
-            Function.prototype.toString = function() {
-                if (this === Function.prototype.toString) {
-                    return 'function toString() { [native code] }';
-                }
-                return originalToString.call(this);
-            };
+                Object.defineProperty(screen, 'pixelDepth', {
+                    get: () => 24
+                });
 
-            // 防止检测 console
-            const originalConsole = window.console;
-            Object.defineProperty(window, 'console', {
-                get: () => originalConsole,
-                set: () => {}
-            });
+                // ==================== 时区 ====================
+                const originalDate = Date;
+                const originalIntl = Intl;
 
-            // 模拟正常的 performance 时间
-            Object.defineProperty(performance.timing, 'navigationStart', {
-                get: () => Date.now() - performance.now()
-            });
+                // ==================== 插件检测防护 ====================
+                // 防止检测 plugins 的真实性
+                Object.setPrototypeOf(navigator.plugins, PluginArray.prototype);
+                Object.setPrototypeOf(navigator.mimeTypes, MimeTypeArray.prototype);
 
-            // ==================== 阻止检测脚本 ====================
-            // 拦截常见的检测脚本
-            const originalFetch = window.fetch;
-            window.fetch = function(...args) {
-                return originalFetch.apply(this, args);
-            };
+                // ==================== 其他防护 ====================
+                // 防止检测 Function.prototype.toString
+                const originalToString = Function.prototype.toString;
+                Function.prototype.toString = function() {
+                    if (this === Function.prototype.toString) {
+                        return 'function toString() { [native code] }';
+                    }
+                    return originalToString.call(this);
+                };
 
-            const originalXHR = window.XMLHttpRequest;
-            window.XMLHttpRequest = function() {
-                return new originalXHR();
-            };
+                // 防止检测 console
+                const originalConsole = window.console;
+                Object.defineProperty(window, 'console', {
+                    get: () => originalConsole,
+                    set: () => {}
+                });
 
-            console.log('🛡️ 反检测脚本已加载');
-        """)
+                // 模拟正常的 performance 时间
+                Object.defineProperty(performance.timing, 'navigationStart', {
+                    get: () => Date.now() - performance.now()
+                });
 
-        self.page = self.browser_context.new_page()
+                // ==================== 阻止检测脚本 ====================
+                // 拦截常见的检测脚本
+                const originalFetch = window.fetch;
+                window.fetch = function(...args) {
+                    return originalFetch.apply(this, args);
+                };
 
-        # 添加页面级别的反检测脚本
-        self.page.add_init_script("""
-            // 覆盖 Canvas 指纹
-            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-            HTMLCanvasElement.prototype.toDataURL = function(type) {
-                if (type === 'image/png' && this.width > 16 && this.height > 16) {
+                const originalXHR = window.XMLHttpRequest;
+                window.XMLHttpRequest = function() {
+                    return new originalXHR();
+                };
+
+                console.log('🛡️ 反检测脚本已加载');
+            """)
+
+            self.page = self.browser_context.new_page()
+
+            # 添加页面级别的反检测脚本
+            self.page.add_init_script("""
+                // 覆盖 Canvas 指纹
+                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(type) {
+                    if (type === 'image/png' && this.width > 16 && this.height > 16) {
+                        // 添加轻微噪声
+                        const ctx = this.getContext('2d');
+                        if (ctx) {
+                            const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                            const data = imageData.data;
+                            // 修改少量像素
+                            for (let i = 0; i < 10; i++) {
+                                const idx = Math.floor(Math.random() * data.length / 4) * 4;
+                                data[idx] = (data[idx] + 1) % 256;
+                            }
+                            ctx.putImageData(imageData, 0, 0);
+                        }
+                    }
+                    return originalToDataURL.apply(this, arguments);
+                };
+
+                // 覆盖 getImageData
+                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+                    const imageData = originalGetImageData.apply(this, arguments);
                     // 添加轻微噪声
-                    const ctx = this.getContext('2d');
-                    if (ctx) {
-                        const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                    if (w > 16 && h > 16) {
                         const data = imageData.data;
-                        // 修改少量像素
                         for (let i = 0; i < 10; i++) {
                             const idx = Math.floor(Math.random() * data.length / 4) * 4;
                             data[idx] = (data[idx] + 1) % 256;
                         }
-                        ctx.putImageData(imageData, 0, 0);
                     }
-                }
-                return originalToDataURL.apply(this, arguments);
-            };
+                    return imageData;
+                };
 
-            // 覆盖 getImageData
-            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-            CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
-                const imageData = originalGetImageData.apply(this, arguments);
-                // 添加轻微噪声
-                if (w > 16 && h > 16) {
-                    const data = imageData.data;
-                    for (let i = 0; i < 10; i++) {
-                        const idx = Math.floor(Math.random() * data.length / 4) * 4;
-                        data[idx] = (data[idx] + 1) % 256;
-                    }
-                }
-                return imageData;
-            };
+                // 模拟真实的鼠标移动
+                let lastMouseX = 0;
+                let lastMouseY = 0;
+                document.addEventListener('mousemove', function(e) {
+                    lastMouseX = e.clientX;
+                    lastMouseY = e.clientY;
+                }, true);
 
-            // 模拟真实的鼠标移动
-            let lastMouseX = 0;
-            let lastMouseY = 0;
-            document.addEventListener('mousemove', function(e) {
-                lastMouseX = e.clientX;
-                lastMouseY = e.clientY;
-            }, true);
+                // 覆盖 requestAnimationFrame 以模拟正常的刷新率
+                const originalRAF = window.requestAnimationFrame;
+                window.requestAnimationFrame = function(callback) {
+                    return originalRAF.call(window, callback);
+                };
 
-            // 覆盖 requestAnimationFrame 以模拟正常的刷新率
-            const originalRAF = window.requestAnimationFrame;
-            window.requestAnimationFrame = function(callback) {
-                return originalRAF.call(window, callback);
-            };
+                // 模拟真实的输入延迟
+                const originalSetTimeout = window.setTimeout;
+                window.setTimeout = function(callback, delay) {
+                    // 添加随机延迟（0-10ms）
+                    const randomDelay = delay + Math.random() * 10;
+                    return originalSetTimeout.call(window, callback, randomDelay);
+                };
+            """)
 
-            // 模拟真实的输入延迟
-            const originalSetTimeout = window.setTimeout;
-            window.setTimeout = function(callback, delay) {
-                // 添加随机延迟（0-10ms）
-                const randomDelay = delay + Math.random() * 10;
-                return originalSetTimeout.call(window, callback, randomDelay);
-            };
-        """)
+            if storage_state:
+                print("✅ 浏览器会话状态已恢复")
 
-        if storage_state:
-            print("✅ 浏览器会话状态已恢复")
-
-        self.page.set_default_timeout(ACTION_TIMEOUT)
-
-        self.context.set_page(self.page)
-
-        print("✅ 浏览器启动成功（已启用反检测模式）")
+            print("✅ 浏览器启动成功（已启用反检测模式）")
 
         self._prompt_credential_login()
     
@@ -1082,11 +1118,11 @@ class WebUIAgent:
                     print(f"🌐 导航到检查点页面: {saved_url}")
                     try:
                         self.page.goto(saved_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                        # 优化：不再等待 networkidle，直接等待 load 状态
                         try:
-                            self.page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
-                        except Exception:
-                            print("⚠️ 网络未完全空闲，继续执行...")
                             self.page.wait_for_load_state("load", timeout=5000)
+                        except Exception:
+                            pass
                         initial_state["current_url"] = self.page.url
                     except Exception as e:
                         print(f"⚠️ 导航到检查点页面失败: {e}")
@@ -1110,11 +1146,11 @@ class WebUIAgent:
                 if start_url:
                     print(f"🌐 导航到起始页面: {start_url}")
                     self.page.goto(start_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    # 优化：不再等待 networkidle，直接等待 load 状态
                     try:
-                        self.page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT)
-                    except Exception:
-                        print("⚠️ 网络未完全空闲，继续执行...")
                         self.page.wait_for_load_state("load", timeout=5000)
+                    except Exception:
+                        pass
                 
                 initial_state = create_initial_state(
                     objective=objective,
@@ -1203,6 +1239,17 @@ class WebUIAgent:
             
             if state.get("error_message"):
                 print(f"⚠️ 最后错误: {state['error_message']}")
+            
+            if state.get("final_summary"):
+                print("\n" + "═"*60)
+                print("📋 任务结果总结")
+                print("═"*60)
+                print(state["final_summary"])
+                print("═"*60)
+            
+            if state.get("is_browsing_task") and state.get("collected_products"):
+                products = state.get("collected_products", [])
+                print(f"\n📦 共收集 {len(products)} 款商品信息")
             
             print(f"💾 检查点: {state.get('saved_checkpoint_id', '无')}")
             

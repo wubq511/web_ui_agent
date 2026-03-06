@@ -43,6 +43,8 @@ import concurrent.futures
 from functools import lru_cache
 import hashlib
 import json
+import os
+import base64
 try:
     import psutil
     HAS_PSUTIL = True
@@ -55,6 +57,7 @@ from bs4 import BeautifulSoup, Tag
 
 from state import AgentState
 from config import ACTION_TIMEOUT, PAGE_LOAD_TIMEOUT, MAX_STEPS
+from config import VISION_ENABLED, VISION_IMAGE_MAX_SIZE, VISION_IMAGE_QUALITY, VISION_MAX_FILE_SIZE
 from utils import parse_json_from_response, get_element_xpath, get_element_selector, _is_valid_css_id, _escape_css_selector, validate_url
 from cache_utils import get_selector_cache, get_prompt_cache, cached_result
 
@@ -92,6 +95,13 @@ try:
     HAS_PAUSE_CONTROLLER = True
 except ImportError:
     HAS_PAUSE_CONTROLLER = False
+
+try:
+    from content_extractor import get_content_extractor, extract_content_from_page, ContentExtractor
+    HAS_CONTENT_EXTRACTOR = True
+except ImportError:
+    HAS_CONTENT_EXTRACTOR = False
+    ContentExtractor = None
 
 
 SYSTEM_PROMPT = """你是一个专业的网页操作助手(web-ui-agent)。你的任务是分析当前网页状态，决定下一步操作来完成用户目标。
@@ -286,6 +296,65 @@ SYSTEM_PROMPT = """你是一个专业的网页操作助手(web-ui-agent)。你�
 3. 使用 click 点击搜索按钮，或使用 press 操作按 Enter
 4. 等待页面加载结果
 
+## 🛒 重要：电商浏览任务指南
+
+**浏览任务识别**：
+当用户目标是以下类型时，属于浏览任务：
+- "找手机"、"找电脑"、"找XX商品" - 需要搜索并比较商品
+- "帮我看看XX"、"推荐XX" - 需要收集信息并给出建议
+- "比较XX和XX" - 需要收集多个商品信息进行对比
+
+**浏览任务流程**：
+1. **搜索阶段**：在搜索框输入关键词，执行搜索
+2. **浏览阶段**：查看搜索结果页面，系统会自动提取商品信息
+3. **深入阶段**（可选）：点击感兴趣的商品查看详情
+4. **总结阶段**：收集足够信息后，使用 `summarize` 操作生成建议
+
+**商品信息提取**：
+系统会自动从电商页面提取以下信息：
+- 商品名称、价格
+- 销量
+- 页面类型（商品列表/商品详情）
+
+**⚠️ 重要：从截图识别商品信息**
+如果你从截图中看到了商品列表，**必须在决策JSON中输出 `products` 字段**，格式如下：
+```json
+{
+    "thought": "从截图中看到了商品列表...",
+    "action_type": "scroll 或 summarize",
+    "products": [
+        {"name": "商品名称", "price": "¥价格"},
+        {"name": "商品名称", "price": "¥价格"}
+    ]
+}
+```
+这样商品信息才能被保存，后续 summarize 才能使用！
+
+**何时使用 summarize 操作**：
+- 已浏览多个商品（至少看到搜索结果）
+- 收集了足够的信息可以给出建议
+- 用户需要综合建议而非继续浏览
+
+**summarize 操作格式**：
+```json
+{
+    "thought": "已收集了X款商品信息，现在生成综合建议",
+    "action_type": "summarize",
+    "value": "可选：额外的总结要求或偏好"
+}
+```
+
+**浏览任务完成标志**：
+- 搜索结果已加载
+- 已浏览多个商品（建议至少5个）
+- 已生成总结建议
+- 然后执行 done 结束任务
+
+**重要提示**：
+- 不要急于结束浏览任务，确保收集了足够信息
+- 如果搜索结果不够，可以尝试翻页或修改搜索词
+- summarize 操作会自动汇总已收集的商品信息
+
 ## 截图信息利用
 - 页面截图路径会显示在提示中
 - 截图可用于确认页面布局和元素位置
@@ -309,7 +378,7 @@ VALID_ACTIONS = [
     "type", "type_slowly", "press", "hotkey",
     "select", "check", "uncheck",
     "scroll", "scroll_to", "goto", "wait", "screenshot",
-    "done"
+    "summarize", "done"
 ]
 
 # 操作所需参数配置
@@ -331,8 +400,171 @@ ACTION_REQUIREMENTS = {
     "goto": {"requires_target": False, "requires_value": True},
     "wait": {"requires_target": False, "requires_value": True},
     "screenshot": {"requires_target": False, "requires_value": False},
+    "summarize": {"requires_target": False, "requires_value": False},
     "done": {"requires_target": False, "requires_value": False},
 }
+
+
+def compress_and_encode_image(image_path: str, max_size: int = VISION_IMAGE_MAX_SIZE, 
+                               quality: int = VISION_IMAGE_QUALITY,
+                               max_file_size: int = VISION_MAX_FILE_SIZE) -> Optional[str]:
+    """
+    压缩图片并编码为 base64 格式，用于发送给多模态 LLM
+    
+    【设计思路】
+    1. 检查图片是否存在
+    2. 使用 PIL 压缩图片（缩放尺寸 + 调整质量）
+    3. 编码为 base64 格式
+    4. 如果压缩后仍超过限制，进一步降低质量
+    
+    【参数】
+    image_path: str - 图片文件路径
+    max_size: int - 最大边长（像素），默认 1920
+    quality: int - JPEG 质量 (1-100)，默认 85
+    max_file_size: int - 最大文件大小（字节），默认 2MB
+    
+    【返回值】
+    Optional[str]: base64 编码的图片数据，失败返回 None
+    """
+    if not image_path or not os.path.exists(image_path):
+        return None
+    
+    try:
+        from PIL import Image
+        import io
+        
+        with Image.open(image_path) as img:
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+            
+            width, height = img.size
+            if max(width, height) > max_size:
+                ratio = max_size / max(width, height)
+                new_width = int(width * ratio)
+                new_height = int(height * ratio)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            current_quality = quality
+            while current_quality >= 30:
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=current_quality, optimize=True)
+                file_size = buffer.tell()
+                
+                if file_size <= max_file_size:
+                    buffer.seek(0)
+                    return base64.b64encode(buffer.read()).decode('utf-8')
+                
+                current_quality -= 10
+            
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=30, optimize=True)
+            buffer.seek(0)
+            return base64.b64encode(buffer.read()).decode('utf-8')
+            
+    except ImportError:
+        print("   ⚠️ PIL 未安装，使用原始图片")
+        try:
+            with open(image_path, 'rb') as f:
+                return base64.b64encode(f.read()).decode('utf-8')
+        except Exception as e:
+            print(f"   ⚠️ 读取图片失败: {e}")
+            return None
+    except Exception as e:
+        print(f"   ⚠️ 图片处理失败: {e}")
+        return None
+
+
+def create_multimodal_message(text: str, image_path: str = None, 
+                               image_base64: str = None) -> HumanMessage:
+    """
+    创建多模态消息（文本 + 图片）
+    
+    【设计思路】
+    根据是否有图片，创建不同格式的消息：
+    - 无图片：纯文本消息
+    - 有图片：多模态消息（文本 + base64 图片）
+    
+    【参数】
+    text: str - 文本内容
+    image_path: str - 图片文件路径（可选）
+    image_base64: str - 已编码的 base64 图片数据（可选，优先使用）
+    
+    【返回值】
+    HumanMessage: LangChain 消息对象
+    """
+    if not image_path and not image_base64:
+        return HumanMessage(content=text)
+    
+    content = [{"type": "text", "text": text}]
+    
+    if image_base64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+        })
+    elif image_path and os.path.exists(image_path):
+        encoded_image = compress_and_encode_image(image_path)
+        if encoded_image:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}
+            })
+    
+    return HumanMessage(content=content)
+
+
+def should_send_screenshot_to_llm(state: AgentState, context: "AgentContext") -> bool:
+    """
+    判断是否应该将截图发送给 LLM
+    
+    【设计思路】
+    不是每次都发送截图，只在关键时刻发送：
+    1. 首次加载页面
+    2. 检测到弹窗/登录表单
+    3. 连续滚动寻找元素
+    4. 任务停滞
+    5. 发生错误
+    6. 用户请求截图
+    
+    【参数】
+    state: AgentState - 当前状态
+    context: AgentContext - Agent 上下文
+    
+    【返回值】
+    bool: 是否应该发送截图
+    """
+    if not VISION_ENABLED:
+        return False
+    
+    screenshot_path = state.get("screenshot_path")
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        return False
+    
+    history = state.get("history", [])
+    last_action = history[-1] if history else None
+    
+    consecutive_scrolls = state.get("consecutive_scrolls", 0)
+    if consecutive_scrolls >= 2:
+        return True
+    
+    if state.get("stagnation_count", 0) > 0:
+        return True
+    
+    if state.get("error_message"):
+        return True
+    
+    if state.get("popup_detected") or state.get("login_form_detected"):
+        return True
+    
+    if last_action:
+        action_type = last_action.get("action_type")
+        if action_type in ["click", "goto", "screenshot"]:
+            return True
+    
+    if not history:
+        return True
+    
+    return False
 
 
 def validate_decision(decision: dict) -> tuple[bool, str]:
@@ -1878,21 +2110,26 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
             element_id_attr = element.get('id', '')
             element_name = element.get('name', '')
             element_type = element.get('type', '')
+            element_placeholder = element.get('placeholder', '')
             
             selector = get_element_selector(element)
             xpath = get_element_xpath(element)
             
-            selector_key = f"{frame_info.get('frame_name', 'main')}:{selector}" if frame_info else selector
+            element_text_preview = extract_element_text(element)[:30] if element.get_text(strip=True) else ''
+            
+            selector_key = f"{frame_info.get('frame_name', 'main')}:{selector}:{element_id_attr}:{element_name}:{element_placeholder[:20] if element_placeholder else ''}" if frame_info else f"{selector}:{element_id_attr}:{element_name}:{element_placeholder[:20] if element_placeholder else ''}"
             if selector_key in seen_selectors:
                 continue
             
             elements_to_check.append((element, selector, xpath, frame_info))
-            element_data_map[selector] = {
+            element_data_map[selector_key] = {
                 'element': element,
+                'selector': selector,
                 'selector_key': selector_key,
                 'element_id_attr': element_id_attr,
                 'element_name': element_name,
                 'element_type': element_type,
+                'element_placeholder': element_placeholder,
                 'interaction_type': interaction_type
             }
         
@@ -1904,7 +2141,15 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
             if not is_visible:
                 continue
             
-            data = element_data_map[selector]
+            element_id_attr_temp = element.get('id', '')
+            element_name_temp = element.get('name', '')
+            element_placeholder_temp = element.get('placeholder', '')
+            temp_selector_key = f"{frame_info.get('frame_name', 'main')}:{selector}:{element_id_attr_temp}:{element_name_temp}:{element_placeholder_temp[:20] if element_placeholder_temp else ''}" if frame_info else f"{selector}:{element_id_attr_temp}:{element_name_temp}:{element_placeholder_temp[:20] if element_placeholder_temp else ''}"
+            
+            data = element_data_map.get(temp_selector_key)
+            if not data:
+                continue
+            
             selector_key = data['selector_key']
             element_id_attr = data['element_id_attr']
             element_name = data['element_name']
@@ -2110,16 +2355,13 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
     
     context.logger.log_perception(len(elements_dict), current_url)
     
-    # 智能截图：只在需要时截图
     screenshot_path = None
     should_screenshot = False
     screenshot_reason = ""
     
-    # 获取历史记录
     history = state.get("history", [])
     last_action = history[-1] if history else None
     
-    # 计算连续滚动次数（检测是否在盲目滚动寻找元素）
     consecutive_scrolls = 0
     for h in reversed(history[-5:]):
         if h.get("action_type") == "scroll":
@@ -2127,52 +2369,64 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
         else:
             break
     
-    # 截图触发条件：
-    # 1. 首次加载页面（没有历史记录）
+    is_product_list_page = False
+    product_list_indicators = [
+        ".gl-warp", ".gl-item", "#J_goodsList",
+        ".m-itemlist", ".items .item",
+        "[class*='product-list']", "[class*='goods-list']"
+    ]
+    for selector in product_list_indicators:
+        try:
+            if page.locator(selector).first.is_visible(timeout=200):
+                is_product_list_page = True
+                break
+        except Exception:
+            continue
+    
+    is_search_result = any(
+        pattern in current_url.lower() 
+        for pattern in ["search", "keyword=", "q=", "wd=", "/s?", "query="]
+    )
+    
     if not history:
         should_screenshot = True
         screenshot_reason = "首次加载页面"
     
-    # 2. 检测到弹窗/登录表单
     elif popup_detected or login_form_detected:
         should_screenshot = True
         screenshot_reason = "检测到弹窗/登录表单"
     
-    # 3. 上一步是 click 操作（页面可能发生变化）
     elif last_action and last_action.get("action_type") == "click":
         should_screenshot = True
         screenshot_reason = "点击操作后页面可能变化"
     
-    # 4. 用户明确请求截图
     elif last_action and last_action.get("action_type") == "screenshot":
         should_screenshot = True
         screenshot_reason = "用户请求截图"
     
-    # 5. 发生错误后
     elif state.get("error_message"):
         should_screenshot = True
         screenshot_reason = "发生错误后记录现场"
     
-    # 6. 连续滚动2次以上（可能在寻找元素，需要截图辅助）
     elif consecutive_scrolls >= 2:
         should_screenshot = True
         screenshot_reason = f"连续滚动{consecutive_scrolls}次未找到目标"
     
-    # 7. 停滞计数增加（任务进度停滞）
     elif state.get("stagnation_count", 0) > 0 and state.get("stagnation_count", 0) % 2 == 0:
-        # 每隔2次停滞截图一次
         should_screenshot = True
         screenshot_reason = f"任务停滞({state.get('stagnation_count')}次)"
     
-    # 8. 上一步是 goto 操作（新页面）
     elif last_action and last_action.get("action_type") == "goto":
         should_screenshot = True
         screenshot_reason = "导航到新页面"
     
-    # 9. 上一步是 type 操作（验证输入是否正确）
     elif last_action and last_action.get("action_type") in ["type", "type_slowly"]:
         should_screenshot = True
         screenshot_reason = "输入操作后验证结果"
+    
+    elif is_product_list_page or is_search_result:
+        should_screenshot = True
+        screenshot_reason = "商品列表页/搜索结果页，截图辅助商品信息提取"
     
     if should_screenshot:
         try:
@@ -2213,8 +2467,56 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
     _perf_duration = (time.perf_counter() - _perf_start) * 1000
     get_performance_monitor().record("perception", _perf_duration, {"elements": len(elements_dict)})
     
-    # 先合并 pending_updates，再设置人工干预相关字段
-    # 这样可以确保人工干预标记不会被 pending_updates 覆盖
+    page_content = {}
+    collected_products = state.get("collected_products", [])
+    is_browsing_task = state.get("is_browsing_task", False)
+    browsing_progress = state.get("browsing_progress", {
+        "pages_visited": 0,
+        "products_collected": 0,
+        "search_completed": False,
+        "enough_data": False
+    })
+    
+    if HAS_CONTENT_EXTRACTOR:
+        try:
+            extractor = get_content_extractor()
+            print(f"   📄 正在提取页面内容...")
+            content = extractor.extract_page_content(page, current_url)
+            page_content = content.to_dict()
+            
+            print(f"   📊 页面类型: {content.page_type}, 平台: {content.platform}")
+            
+            if content.products:
+                new_products = [p.to_dict() for p in content.products]
+                existing_names = {p.get("name", "")[:30] for p in collected_products}
+                for p in new_products:
+                    if p.get("name", "")[:30] not in existing_names:
+                        collected_products.append(p)
+                
+                if len(collected_products) > 0:
+                    print(f"   📦 已收集 {len(collected_products)} 款商品信息")
+            else:
+                print(f"   ⚠️ 未从页面提取到商品信息")
+            
+            objective = state.get("objective", "").lower()
+            browsing_keywords = ["找", "搜索", "看", "推荐", "比较", "帮我", "买", "选购"]
+            if any(kw in objective for kw in browsing_keywords):
+                is_browsing_task = True
+            
+            browsing_progress["pages_visited"] += 1
+            browsing_progress["products_collected"] = len(collected_products)
+            
+            if content.page_type == "product_list":
+                browsing_progress["search_completed"] = True
+            
+            if browsing_progress["products_collected"] >= 5:
+                browsing_progress["enough_data"] = True
+                
+        except Exception as e:
+            import traceback
+            print(f"   ⚠️ 内容提取失败: {e}")
+            print(f"   📋 错误详情: {traceback.format_exc()[:500]}")
+    
     result = {
         **pending_updates,
         "elements_dict": elements_dict,
@@ -2231,6 +2533,10 @@ def perception_node(state: AgentState, page: Page, context: AgentContext) -> dic
         "manual_intervention_reason": manual_intervention_reason,
         "captcha_detected": captcha_detected,
         "sms_code_input_detected": sms_code_input_detected,
+        "page_content": page_content,
+        "collected_products": collected_products,
+        "is_browsing_task": is_browsing_task,
+        "browsing_progress": browsing_progress,
     }
     
     return result
@@ -2303,6 +2609,15 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
     # 检查进度停滞是否达到阈值
     stagnation_count = state.get("stagnation_count", 0)
     stagnation_threshold = state.get("adjusted_stagnation_threshold", 5)
+    
+    # 检查停滞是否达到阈值的一半，触发模型自动切换
+    if stagnation_count >= stagnation_threshold // 2 and stagnation_count < stagnation_threshold:
+        if HAS_MODEL_MANAGER:
+            model_manager = get_model_manager()
+            if model_manager:
+                switched = model_manager.switch_on_stagnation(stagnation_count, stagnation_threshold)
+                if switched:
+                    print(f"💡 检测到任务停滞({stagnation_count}/{stagnation_threshold})，已切换到更强模型尝试突破")
     
     if stagnation_count >= stagnation_threshold:
         print("\n" + "="*60)
@@ -2474,20 +2789,35 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
     
     user_prompt = f"目标: {state['objective']}\nURL: {state['current_url']}\n"
     
-    # 添加截图路径信息（增强提示）
     screenshot_path = state.get("screenshot_path")
+    send_screenshot = should_send_screenshot_to_llm(state, context) if screenshot_path else False
+    
     if screenshot_path:
         import os
         screenshot_filename = os.path.basename(screenshot_path)
-        user_prompt += f"📸 页面截图: {screenshot_filename}\n"
         
-        # 根据截图原因给出不同的提示
-        if consecutive_scrolls >= 2:
-            user_prompt += "⚠️ 已连续滚动多次，请查看截图确认目标元素位置！\n"
-        elif state.get("stagnation_count", 0) > 0:
-            user_prompt += "⚠️ 任务进度停滞，请查看截图分析页面状态！\n"
+        if send_screenshot:
+            user_prompt += f"📸 页面截图已附上，请直接查看图片分析页面布局和元素位置！\n"
+            
+            if consecutive_scrolls >= 2:
+                user_prompt += "⚠️ 已连续滚动多次仍未找到目标，请仔细查看截图中的页面内容！\n"
+            elif state.get("stagnation_count", 0) > 0:
+                user_prompt += "⚠️ 任务进度停滞，请分析截图中的页面状态，找出问题所在！\n"
+            elif state.get("error_message"):
+                user_prompt += "⚠️ 上一步操作出错，请查看截图分析当前页面状态！\n"
+            elif state.get("popup_detected") or state.get("login_form_detected"):
+                user_prompt += "⚠️ 检测到弹窗/登录表单，请查看截图确认具体内容！\n"
+            else:
+                user_prompt += "💡 请结合截图中的视觉信息做出决策！\n"
         else:
-            user_prompt += "💡 截图已保存，可参考页面布局定位元素\n"
+            user_prompt += f"📸 页面截图: {screenshot_filename}（仅供参考）\n"
+            
+            if consecutive_scrolls >= 2:
+                user_prompt += "⚠️ 已连续滚动多次，请参考元素列表定位目标！\n"
+            elif state.get("stagnation_count", 0) > 0:
+                user_prompt += "⚠️ 任务进度停滞，请分析当前状态！\n"
+            else:
+                user_prompt += "💡 请根据元素列表定位目标元素\n"
 
     if popup_detected:
         user_prompt += "⚠️弹窗遮挡!只操作[弹窗]标记元素\n"
@@ -2625,6 +2955,49 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
     
     user_prompt += f"\n{elements_description}\n{history_text}\n"
     
+    is_browsing_task = state.get("is_browsing_task", False)
+    collected_products = state.get("collected_products", [])
+    browsing_progress = state.get("browsing_progress", {})
+    page_content = state.get("page_content", {})
+    
+    if is_browsing_task:
+        user_prompt += "\n🛒【浏览任务模式】\n"
+        
+        products_count = len(collected_products)
+        pages_visited = browsing_progress.get("pages_visited", 0)
+        search_completed = browsing_progress.get("search_completed", False)
+        enough_data = browsing_progress.get("enough_data", False)
+        
+        user_prompt += f"📊 浏览进度: 已访问 {pages_visited} 页, 收集 {products_count} 款商品\n"
+        
+        if page_content:
+            page_type = page_content.get("page_type", "unknown")
+            platform = page_content.get("platform", "unknown")
+            user_prompt += f"📄 当前页面类型: {page_type}, 平台: {platform}\n"
+        
+        if collected_products:
+            user_prompt += f"\n📦 已收集商品信息 ({products_count} 款):\n"
+            for i, product in enumerate(collected_products[:10]):
+                name = product.get("name", "未知")[:40]
+                price = product.get("price", "")
+                sales = product.get("sales_count", "")
+                shop = product.get("shop_name", "")
+                
+                product_line = f"  {i+1}. {name}"
+                if price:
+                    product_line += f" | 价格: {price}"
+                if sales:
+                    product_line += f" | 销量: {sales}"
+                if shop:
+                    product_line += f" | 店铺: {shop}"
+                user_prompt += product_line + "\n"
+        
+        if enough_data or products_count >= 5:
+            user_prompt += "\n✅ 已收集足够商品信息！建议使用 summarize 操作生成综合建议。\n"
+            user_prompt += "💡 summarize 操作会汇总所有商品信息并给出购买建议。\n"
+        elif search_completed and products_count < 5:
+            user_prompt += "\n💡 继续浏览或翻页以收集更多商品信息。\n"
+    
     if state.get("error_message"):
         user_prompt += f"错误:{state['error_message'][:50]}\n"
     
@@ -2633,12 +3006,17 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
     start_time = time.time()
     
     try:
+        if send_screenshot and screenshot_path:
+            print(f"   🖼️ 发送截图给 LLM 进行视觉分析...")
+            human_message = create_multimodal_message(user_prompt, image_path=screenshot_path)
+        else:
+            human_message = HumanMessage(content=user_prompt)
+        
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=user_prompt)
+            human_message
         ]
         
-        # 检查用户命令
         context.process_user_commands()
         
         if context.user_interaction.is_aborted():
@@ -2703,11 +3081,46 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
             "result": "待执行"
         }
         
-        # 构建返回状态，包含所有需要更新的字段
+        llm_products = decision.get("products", [])
+        if llm_products:
+            print(f"   📦 LLM识别到 {len(llm_products)} 款商品")
+            collected_products = state.get("collected_products", [])
+            existing_names = {p.get("name", "")[:30] for p in collected_products}
+            
+            for product in llm_products:
+                name = product.get("name", "")
+                if name and name[:30] not in existing_names:
+                    product_entry = {
+                        "name": name,
+                        "price": product.get("price", ""),
+                        "shop_name": product.get("shop_name", ""),
+                        "sales_count": product.get("sales_count", ""),
+                        "platform": "llm_identified"
+                    }
+                    collected_products.append(product_entry)
+                    existing_names.add(name[:30])
+                    print(f"      ✓ {name[:30]}... - {product.get('price', '未知')}")
+            
+            print(f"   📦 累计收集 {len(collected_products)} 款商品")
+        else:
+            collected_products = state.get("collected_products", [])
+        
+        browsing_progress = state.get("browsing_progress", {
+            "pages_visited": 0,
+            "products_collected": 0,
+            "search_completed": False,
+            "enough_data": False
+        })
+        browsing_progress["products_collected"] = len(collected_products)
+        if len(collected_products) >= 5:
+            browsing_progress["enough_data"] = True
+        
         result = {
             "history": state["history"] + [history_entry],
             "current_decision": decision,
-            "error_message": None
+            "error_message": None,
+            "collected_products": collected_products,
+            "browsing_progress": browsing_progress,
         }
         
         # 如果之前处理了人工干预，确保在返回时重置标记
@@ -2759,26 +3172,50 @@ def reasoning_node(state: AgentState, llm: ChatOpenAI, context: AgentContext) ->
         }
 
 
-def _safe_wait_for_page(page: Page, timeout: int = ACTION_TIMEOUT):
+def _safe_wait_for_page(page: Page, timeout: int = None, fast_mode: bool = False):
     """
-    安全的页面加载等待函数
+    安全的页面加载等待函数（性能优化版v3）
     
-    【策略】
-    1. 首先尝试等待 networkidle 状态
-    2. 如果超时，降级为等待 load 状态
-    3. 如果仍然超时，只等待 domcontentloaded 状态
+    【优化策略】
+    1. 不再等待 networkidle（现代网站常有持续网络活动）
+    2. 使用 domcontentloaded 作为主要等待状态
+    3. 快速模式下只等待最短时间
+    4. 添加智能等待，检测页面是否真正加载完成
     
     【参数】
     page: Playwright 页面对象
-    timeout: 超时时间（毫秒）
+    timeout: 超时时间（毫秒），默认使用 ACTION_TIMEOUT
+    fast_mode: 快速模式，减少等待时间
     """
-    try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
-    except Exception:
+    if timeout is None:
+        timeout = ACTION_TIMEOUT
+    
+    # 快速模式：只等待 domcontentloaded
+    if fast_mode:
         try:
-            page.wait_for_load_state("load", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
             pass
+        return
+    
+    # 标准模式：智能等待策略
+    try:
+        # 首先等待 DOM 加载完成（通常很快）
+        page.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
+    except Exception:
+        pass
+    
+    # 然后尝试等待 load 状态（资源加载完成）
+    try:
+        page.wait_for_load_state("load", timeout=3000)
+    except Exception:
+        pass
+    
+    # 最后给页面一点时间执行 JavaScript
+    try:
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
 
 
 def _human_like_mouse_move(page: Page, locator, steps: int = 10, fast_mode: bool = False):
@@ -2973,9 +3410,34 @@ def _verify_input_value(locator, expected_value: str, max_retries: int = 3) -> t
     【返回值】
     tuple[bool, str]: (是否验证通过, 实际值或错误信息)
     """
-    if not expected_value:
+    def get_element_value(locator) -> str:
+        """
+        获取元素的值，支持 input/textarea/select 和 contenteditable 元素
+        """
         try:
             actual_value = locator.input_value(timeout=1000)
+            return actual_value if actual_value else ''
+        except Exception:
+            pass
+        
+        try:
+            inner_text = locator.inner_text(timeout=1000)
+            if inner_text:
+                return inner_text
+        except Exception:
+            pass
+        
+        try:
+            text_content = locator.evaluate('el => el.textContent || el.innerText || el.value || ""', timeout=1000)
+            return text_content if text_content else ''
+        except Exception:
+            pass
+        
+        return ''
+    
+    if not expected_value:
+        try:
+            actual_value = get_element_value(locator)
             return actual_value == "", actual_value
         except Exception as e:
             return False, f"无法读取: {e}"
@@ -2983,7 +3445,7 @@ def _verify_input_value(locator, expected_value: str, max_retries: int = 3) -> t
     for attempt in range(max_retries):
         try:
             time.sleep(0.1 * (attempt + 1))
-            actual_value = locator.input_value(timeout=1000)
+            actual_value = get_element_value(locator)
             
             if actual_value == expected_value:
                 return True, actual_value
@@ -3013,7 +3475,7 @@ def _verify_input_value(locator, expected_value: str, max_retries: int = 3) -> t
             print(f"   ⚠️ 验证读取失败 (尝试 {attempt + 1}/{max_retries}): {e}")
     
     try:
-        final_value = locator.input_value(timeout=1000)
+        final_value = get_element_value(locator)
         return False, final_value
     except Exception as e:
         return False, f"无法读取: {e}"
@@ -3231,13 +3693,84 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
     
     try:
         if action_type == "done":
+            final_summary = state.get("final_summary", "")
+            collected_products = state.get("collected_products", [])
+            
+            if collected_products and not final_summary:
+                if HAS_CONTENT_EXTRACTOR:
+                    try:
+                        extractor = get_content_extractor()
+                        final_summary = extractor.generate_recommendation(state.get("objective", ""), products=collected_products)
+                        print("\n" + "="*60)
+                        print("📋 商品搜索结果汇总")
+                        print("="*60)
+                        print(final_summary)
+                        print("="*60)
+                    except Exception as e:
+                        print(f"   ⚠️ 生成建议失败: {e}")
+            
             print("✅ 任务完成！")
             new_history[-1]["result"] = "任务完成"
             return {
                 "is_done": True,
                 "history": new_history,
                 "error_message": None,
-                "step_count": state["step_count"] + 1
+                "step_count": state["step_count"] + 1,
+                "final_summary": final_summary
+            }
+        
+        elif action_type == "summarize":
+            def do_summarize():
+                collected_products = state.get("collected_products", [])
+                objective = state.get("objective", "")
+                
+                print(f"   📋 summarize: collected_products 数量 = {len(collected_products)}")
+                print(f"   📋 summarize: is_browsing_task = {state.get('is_browsing_task', False)}")
+                
+                if not collected_products:
+                    print(f"   ⚠️ collected_products 为空，尝试从全局提取器获取")
+                    if HAS_CONTENT_EXTRACTOR:
+                        extractor = get_content_extractor()
+                        all_products = extractor.collected_products
+                        print(f"   📋 全局提取器中有 {len(all_products)} 款商品")
+                        if all_products:
+                            collected_products = [p.to_dict() for p in all_products]
+                
+                if not collected_products:
+                    return "暂未收集到商品信息，无法生成建议"
+                
+                if HAS_CONTENT_EXTRACTOR:
+                    extractor = get_content_extractor()
+                    summary = extractor.generate_recommendation(objective, products=collected_products)
+                    
+                    extra_request = decision.get("value", "")
+                    if extra_request:
+                        summary += f"\n\n📝 额外要求: {extra_request}"
+                    
+                    print("\n" + "="*60)
+                    print("📋 商品搜索结果汇总")
+                    print("="*60)
+                    print(summary)
+                    print("="*60)
+                    
+                    return summary
+                else:
+                    products_text = "已收集商品:\n"
+                    for i, p in enumerate(collected_products[:10]):
+                        name = p.get("name", "未知")[:40]
+                        price = p.get("price", "未知")
+                        products_text += f"  {i+1}. {name} - {price}\n"
+                    return products_text
+            
+            summary_result = do_summarize()
+            new_history[-1]["result"] = summary_result
+            
+            return {
+                "history": new_history,
+                "error_message": None,
+                "step_count": state["step_count"] + 1,
+                "final_summary": summary_result,
+                "consecutive_success": state.get("consecutive_success", 0) + 1
             }
         
         elif action_type == "goto":
@@ -3247,8 +3780,9 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 if not is_valid:
                     raise ValueError(result)
                 url = result
-                page.goto(url, timeout=PAGE_LOAD_TIMEOUT)
-                _safe_wait_for_page(page)
+                # 使用 domcontentloaded 作为主要等待状态，大幅提升性能
+                page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                _safe_wait_for_page(page, fast_mode=fast_mode)
                 return f"成功导航到 {url}"
             return try_action(do_goto, "goto")
         
@@ -3262,8 +3796,9 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 if not fast_mode:
                     import random
                     page.wait_for_timeout(random.randint(50, 100))
-                locator.click(timeout=ACTION_TIMEOUT)
-                _safe_wait_for_page(page)
+                # 点击超时从 ACTION_TIMEOUT 降低到 5 秒
+                locator.click(timeout=5000)
+                _safe_wait_for_page(page, fast_mode=fast_mode)
                 return f"成功点击元素 {decision.get('target_id')}"
             return try_action(do_click, "click")
         
@@ -3293,8 +3828,8 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
-                locator.hover(timeout=ACTION_TIMEOUT, force=True)
-                page.wait_for_timeout(500)
+                locator.hover(timeout=5000, force=True)  # 从 ACTION_TIMEOUT 降低到 5 秒
+                page.wait_for_timeout(200)  # 从 500ms 降低到 200ms
                 return f"成功悬停在元素 {decision.get('target_id')}"
             return try_action(do_hover, "hover")
         
@@ -3306,7 +3841,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 if not locator:
                     raise ValueError("无法定位元素")
                 target_locator = page.locator(target_desc).first
-                locator.drag_to(target_locator, timeout=ACTION_TIMEOUT)
+                locator.drag_to(target_locator, timeout=5000)  # 从 ACTION_TIMEOUT 降低到 5 秒
                 return f"成功拖拽元素到 {target_desc}"
             return try_action(do_drag, "drag")
         
@@ -3432,7 +3967,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
             def do_press():
                 key = decision.get("value", "Enter")
                 page.keyboard.press(key)
-                _safe_wait_for_page(page)
+                _safe_wait_for_page(page, fast_mode=fast_mode)
                 return f"成功按下 {key}"
             return try_action(do_press, "press")
         
@@ -3444,7 +3979,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                     page.keyboard.down(key.strip())
                 for key in reversed(key_list):
                     page.keyboard.up(key.strip())
-                page.wait_for_timeout(300)
+                page.wait_for_timeout(100)  # 从 300ms 降低到 100ms
                 return f"成功执行快捷键 {keys}"
             return try_action(do_hotkey, "hotkey")
         
@@ -3455,7 +3990,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
-                locator.select_option(label=value, timeout=ACTION_TIMEOUT)
+                locator.select_option(label=value, timeout=5000)  # 从 ACTION_TIMEOUT 降低到 5 秒
                 
                 try:
                     selected = locator.input_value(timeout=1000)
@@ -3473,7 +4008,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
-                locator.check(timeout=ACTION_TIMEOUT, force=True)
+                locator.check(timeout=5000, force=True)  # 从 ACTION_TIMEOUT 降低到 5 秒
                 return f"成功勾选元素 {decision.get('target_id')}"
             return try_action(do_check, "check")
         
@@ -3483,7 +4018,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
-                locator.uncheck(timeout=ACTION_TIMEOUT, force=True)
+                locator.uncheck(timeout=5000, force=True)  # 从 ACTION_TIMEOUT 降低到 5 秒
                 return f"成功取消勾选元素 {decision.get('target_id')}"
             return try_action(do_uncheck, "uncheck")
         
@@ -3506,7 +4041,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                         page.mouse.wheel(amount, 0)
                     elif direction == "left":
                         page.mouse.wheel(-amount, 0)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(200)  # 从 500ms 降低到 200ms
                 return f"成功滚动 {value}"
             return try_action(do_scroll, "scroll")
         
@@ -3516,7 +4051,7 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
-                locator.scroll_into_view_if_needed(timeout=ACTION_TIMEOUT)
+                locator.scroll_into_view_if_needed(timeout=5000)  # 从 ACTION_TIMEOUT 降低到 5 秒
                 return f"成功滚动到元素 {decision.get('target_id')}"
             return try_action(do_scroll_to, "scroll_to")
         

@@ -44,6 +44,7 @@ class SwitchReason(Enum):
     MANUAL = "manual"
     INIT = "init"
     ERROR_RECOVERY = "error_recovery"
+    STAGNATION = "stagnation"
 
 
 @dataclass
@@ -381,6 +382,46 @@ class ModelManager:
         )
         
         print(f"🔄 模型自动切换: {from_model} -> {AUTO_SWITCH_TARGET_MODEL} (连续失败，切换到最强模型)")
+        return True
+    
+    def switch_on_stagnation(self, stagnation_count: int, stagnation_threshold: int) -> bool:
+        """
+        因任务停滞自动切换模型
+        
+        【触发条件】
+        停滞计数达到阈值的一半时触发切换
+        
+        【参数】
+        stagnation_count: 当前停滞计数
+        stagnation_threshold: 停滞阈值
+        
+        【返回值】
+        bool: 是否成功切换
+        """
+        if not self._config.get("auto_switch_enabled", True):
+            return False
+        
+        if stagnation_count < stagnation_threshold // 2:
+            return False
+        
+        if self._current_model == AUTO_SWITCH_TARGET_MODEL:
+            return False
+        
+        if not self._can_switch():
+            return False
+        
+        from_model = self._current_model
+        self._current_model = AUTO_SWITCH_TARGET_MODEL
+        self._last_switch_time = time.time()
+        
+        self._record_switch(
+            from_model=from_model,
+            to_model=AUTO_SWITCH_TARGET_MODEL,
+            reason=SwitchReason.STAGNATION,
+            detail=f"任务停滞({stagnation_count}/{stagnation_threshold})，切换到最强模型"
+        )
+        
+        print(f"🔄 模型自动切换: {from_model} -> {AUTO_SWITCH_TARGET_MODEL} (任务停滞 {stagnation_count}/{stagnation_threshold}，切换到最强模型)")
         return True
     
     def _can_switch(self) -> bool:

@@ -332,6 +332,62 @@ class AgentState(TypedDict):
     【特点】需要用户手动输入验证码
     【用途】触发人工干预提示
     """
+    
+    page_content: dict
+    """
+    page_content: dict - 当前页面提取的内容
+    
+    【作用】存储从当前页面提取的结构化内容
+    【结构】{
+        "page_type": "product_list" | "product_detail" | "unknown",
+        "title": "页面标题",
+        "products": [...],  # 商品信息列表
+        "main_content": "主要内容文本",
+        "platform": "jd" | "taobao" | "tmall" | "unknown"
+    }
+    【用途】帮助Agent理解页面内容，支持商品搜索等浏览任务
+    """
+    
+    collected_products: list[dict]
+    """
+    collected_products: list[dict] - 已收集的商品信息列表
+    
+    【作用】存储在浏览过程中收集的所有商品信息
+    【特点】跨页面累积，用于最终生成购买建议
+    【用途】支持"找手机"等需要比较多个商品的任务
+    """
+    
+    final_summary: str | None
+    """
+    final_summary: str | None - 最终总结/建议
+    
+    【作用】存储任务完成时生成的总结或购买建议
+    【特点】在任务完成前为None，完成时由LLM生成
+    【用途】向用户展示任务结果，如商品推荐
+    """
+    
+    is_browsing_task: bool
+    """
+    is_browsing_task: bool - 是否是浏览类任务
+    
+    【作用】标记当前任务是否需要浏览和收集信息
+    【特点】根据任务目标自动判断
+    【用途】决定是否需要在完成时生成总结
+    """
+    
+    browsing_progress: dict
+    """
+    browsing_progress: dict - 浏览进度信息
+    
+    【作用】记录浏览类任务的进度
+    【结构】{
+        "pages_visited": 0,        # 已访问页面数
+        "products_collected": 0,   # 已收集商品数
+        "search_completed": False, # 搜索是否完成
+        "enough_data": False       # 是否收集了足够数据
+    }
+    【用途】判断浏览任务是否可以结束
+    """
 
 
 def create_initial_state(objective: str, current_url: str = "", 
@@ -376,7 +432,17 @@ def create_initial_state(objective: str, current_url: str = "",
         need_manual_intervention=False,
         manual_intervention_reason=[],
         captcha_detected=False,
-        sms_code_input_detected=False
+        sms_code_input_detected=False,
+        page_content={},
+        collected_products=[],
+        final_summary=None,
+        is_browsing_task=False,
+        browsing_progress={
+            "pages_visited": 0,
+            "products_collected": 0,
+            "search_completed": False,
+            "enough_data": False
+        }
     )
 
 

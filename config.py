@@ -49,38 +49,38 @@ MODEL_NAME = "gemini-3-flash-preview"
 AVAILABLE_MODELS = {
     "gemini-3-flash-preview": {
         "name": "Gemini 3 Flash Preview",
-        "description": "Google Gemini 3 Flash 预览版，速度快，成本低",
+        "description": "Google Gemini 3 Flash 预览版，速度快，成本低，支持视觉理解",
         "priority": 1,
-        "tags": ["fast", "cost-effective", "general"],
+        "tags": ["fast", "cost-effective", "general", "vision"],
         "max_tokens": 8192,
-        "supports_vision": False,
+        "supports_vision": True,
         "supports_auto_switch": True,
     },
     "kimi-k2.5": {
         "name": "Kimi K2.5",
-        "description": "月之暗面 Kimi K2.5，中文理解能力强，agent能力强",
+        "description": "月之暗面 Kimi K2.5，中文理解能力强，agent能力强，支持视觉理解",
         "priority": 2,
-        "tags": ["chinese", "reasoning", "long-context"],
+        "tags": ["chinese", "reasoning", "long-context", "vision"],
         "max_tokens": 8192,
-        "supports_vision": False,
+        "supports_vision": True,
         "supports_auto_switch": True,
     },
     "claude-opus-4-6": {
         "name": "Claude Opus 4.6",
-        "description": "Anthropic Claude Opus 4.6，最强agent模型，推理能力最强，支持复杂任务",
+        "description": "Anthropic Claude Opus 4.6，最强agent模型，推理能力最强，支持复杂任务和视觉理解",
         "priority": 3,
-        "tags": ["reasoning", "complex-tasks", "safety"],
+        "tags": ["reasoning", "complex-tasks", "safety", "vision"],
         "max_tokens": 4096,
-        "supports_vision": False,
+        "supports_vision": True,
         "supports_auto_switch": True,
     },
     "doubao-seed-2-0-pro": {
         "name": "Doubao Seed 2.0 Pro",
-        "description": "字节跳动豆包 Seed 2.0 Pro，性价比高",
+        "description": "字节跳动豆包 Seed 2.0 Pro，性价比高，支持视觉理解",
         "priority": 4,
-        "tags": ["chinese", "cost-effective", "fast"],
+        "tags": ["chinese", "cost-effective", "fast", "vision"],
         "max_tokens": 8192,
-        "supports_vision": False,
+        "supports_vision": True,
         "supports_auto_switch": True,
     },
     "minimax-m2.5": {
@@ -120,8 +120,10 @@ MAX_STEPS_LIMIT = 100
 DYNAMIC_STEP_INCREMENT = 5
 STEP_ADJUSTMENT_THRESHOLD = 0.7
 
-ACTION_TIMEOUT = 30000
-PAGE_LOAD_TIMEOUT = 60000
+# 操作超时时间（毫秒）- 优化后从30秒降低到10秒
+ACTION_TIMEOUT = 10000
+# 页面加载超时时间（毫秒）- 优化后从60秒降低到30秒
+PAGE_LOAD_TIMEOUT = 30000
 
 LLM_TIMEOUT = 60
 LLM_TEMPERATURE = 0.7
@@ -240,3 +242,9 @@ SCREENSHOT_MAX_FPS = 30
 SCREENSHOT_JPEG_QUALITY = 60
 SCREENSHOT_MAX_WIDTH = 1280
 SCREENSHOT_MAX_HEIGHT = 720
+
+# 视觉辅助配置（截图发送给LLM）
+VISION_ENABLED = True
+VISION_IMAGE_MAX_SIZE = 1920
+VISION_IMAGE_QUALITY = 85
+VISION_MAX_FILE_SIZE = 2 * 1024 * 1024

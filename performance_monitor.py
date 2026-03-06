@@ -110,10 +110,10 @@ class PerformanceMonitor:
     THRESHOLDS = {
         "perception": 3000,
         "reasoning": 10000,
-        "action": 2000,
-        "click": 500,
-        "type": 1000,
-        "goto": 5000,
+        "action": 1500,  # 优化后从 2000 降低到 1500
+        "click": 300,    # 优化后从 500 降低到 300
+        "type": 800,     # 优化后从 1000 降低到 800
+        "goto": 3000,    # 优化后从 5000 降低到 3000
         "llm_call": 8000,
         "element_visibility": 100,
         "iframe_extraction": 2000,

@@ -149,15 +149,21 @@ def get_element_xpath(element: Tag) -> str:
 
 def get_element_selector(element: Tag) -> str:
     """
-    获取元素的 CSS 选择器
+    获取元素的 CSS 选择器（增强版 v2）
     
     【设计思路】
     CSS 选择器是另一种定位元素的方式，通常比 XPath 更简洁。
     我们按以下优先级生成选择器：
     1. id 选择器（#id）
-    2. class 选择器（.class）
+    2. 组合 class 选择器（.class1.class2）- 提高精确度
     3. 属性选择器（[attr=value]）
-    4. 标签选择器（tag）
+    4. 标签 + 属性组合选择器
+    5. 文本内容选择器（:text）- 用于无其他特征的元素
+    
+    【改进】
+    对于只有 class 的元素，组合多个 class 以提高选择器的特异性，
+    避免多个元素生成相同的选择器导致搜索框等关键元素被跳过。
+    对于没有任何特征的元素，使用文本内容来定位。
     
     【参数】
     element: Tag - BeautifulSoup 解析的元素对象
@@ -165,21 +171,65 @@ def get_element_selector(element: Tag) -> str:
     【返回值】
     str: 元素的 CSS 选择器
     """
+    tag_name = element.name
+    
     if element.get('id'):
         return f"#{element.get('id')}"
     
     if element.get('class'):
         classes = element.get('class')
         if isinstance(classes, list) and classes:
+            valid_classes = [c for c in classes if c and not c.startswith(':') and len(c) < 50]
+            if valid_classes:
+                if len(valid_classes) >= 2:
+                    return f".{'.'.join(valid_classes[:3])}"
+                else:
+                    return f"{tag_name}.{valid_classes[0]}"
             return f".{classes[0]}"
     
     if element.get('name'):
-        return f"[name='{element.get('name')}']"
+        return f"{tag_name}[name='{element.get('name')}']"
     
     if element.get('type'):
-        return f"{element.name}[type='{element.get('type')}']"
+        return f"{tag_name}[type='{element.get('type')}']"
     
-    return element.name
+    if element.get('placeholder'):
+        placeholder = element.get('placeholder')[:30].replace("'", "\\'")
+        return f"{tag_name}[placeholder*='{placeholder}']"
+    
+    if element.get('role'):
+        role = element.get('role')
+        text = element.get_text(strip=True)[:30]
+        if text:
+            text_escaped = text.replace('"', '\\"')
+            return f'{tag_name}[role="{role}"]:has-text("{text_escaped}")'
+        return f'{tag_name}[role="{role}"]'
+    
+    if element.get('href'):
+        href = element.get('href', '')
+        if href and not href.startswith('javascript:'):
+            if href.startswith('#'):
+                return f'{tag_name}[href="{href}"]'
+            href_short = href[:50].replace("'", "\\'")
+            return f"{tag_name}[href*='{href_short}']"
+    
+    text = element.get_text(strip=True)
+    if text and len(text) > 0 and len(text) < 50:
+        text_escaped = text.replace('"', '\\"')
+        return f'{tag_name}:text("{text_escaped}")'
+    
+    parent = element.parent
+    if parent and hasattr(parent, 'get'):
+        parent_class = parent.get('class', [])
+        if isinstance(parent_class, list) and parent_class:
+            parent_class_str = parent_class[0]
+            if parent_class_str and len(parent_class_str) < 30:
+                return f".{parent_class_str} > {tag_name}"
+        parent_id = parent.get('id', '')
+        if parent_id:
+            return f"#{parent_id} {tag_name}"
+    
+    return tag_name
 
 
 def _is_valid_css_id(id_value: str) -> bool:
