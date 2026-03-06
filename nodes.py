@@ -76,6 +76,7 @@ from console_formatter import (
     print_checkpoint_saved, print_session_saved, print_task_complete,
     print_task_terminated, print_progress_hint, print_maybe_complete, print_separator
 )
+from security_utils import mask_string
 
 try:
     from model_manager import get_model_manager
@@ -3919,13 +3920,17 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                             if element_type == "recipient" and "@" not in actual_value:
                                 print(f"   ⚠️ 警告：收件人输入框的值似乎不是有效的邮箱地址")
                             
-                            return f"成功输入并验证 '{value}'"
+                            # 脱敏敏感信息后再返回
+                            display_value = mask_string(value, show_prefix=1, show_suffix=1) if len(value) > 4 else "****"
+                            return f"成功输入并验证 '{display_value}'"
                         else:
                             if attempt < max_retries - 1:
                                 print(f"   🔄 输入验证失败，重试 {attempt + 2}/{max_retries}")
                                 page.wait_for_timeout(100)
                                 continue
-                            return f"输入完成但验证有差异: 期望 '{value}', 实际 '{actual_value}'"
+                            # 脱敏敏感信息后再返回
+                            display_actual = mask_string(actual_value, show_prefix=1, show_suffix=1) if len(actual_value) > 4 else "****"
+                            return f"输入完成但验证有差异: 期望 '{display_actual}'"
                     except Exception as e:
                         last_error = e
                         if attempt < max_retries - 1:
@@ -3958,9 +3963,14 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                 verified, actual_value = _verify_input_value(locator, value)
                 
                 if verified:
-                    return f"成功逐字输入并验证 '{value}'"
+                    # 脱敏敏感信息后再返回
+                    display_value = mask_string(value, show_prefix=1, show_suffix=1) if len(value) > 4 else "****"
+                    return f"成功逐字输入并验证 '{display_value}'"
                 else:
-                    return f"逐字输入完成但验证有差异: 期望 '{value}', 实际 '{actual_value}'"
+                    # 脱敏敏感信息后再返回
+                    display_value = mask_string(value, show_prefix=1, show_suffix=1) if len(value) > 4 else "****"
+                    display_actual = mask_string(actual_value, show_prefix=1, show_suffix=1) if len(actual_value) > 4 else "****"
+                    return f"逐字输入完成但验证有差异: 期望 '{display_value}', 实际 '{display_actual}'"
             return try_action(do_type_slowly, "type_slowly")
         
         elif action_type == "press":
@@ -4122,6 +4132,8 @@ def should_continue(state: AgentState, context: AgentContext) -> str:
         return "end"
     
     if state["is_done"]:
+        # 任务完成时打印100%进度，确保用户看到正确的完成状态
+        print_progress_hint(1.0, 0, 1)
         print("\n🎉 任务已完成，结束循环")
         context.logger.log_termination("正常完成")
         return "end"

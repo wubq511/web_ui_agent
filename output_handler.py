@@ -49,6 +49,11 @@ def mask_sensitive_in_dict(data: dict, parent_action_type: str = None) -> dict:
     
     【返回值】
     脱敏后的字典副本
+    
+    【设计思路】
+    1. value 字段：如果是 type/input/fill 动作，需要脱敏
+    2. thought 字段：使用智能脱敏，只脱敏真正的密码值
+    3. 其他字段：只在明确是密码字段时才脱敏
     """
     if not isinstance(data, dict):
         return data
@@ -60,13 +65,15 @@ def mask_sensitive_in_dict(data: dict, parent_action_type: str = None) -> dict:
         key_lower = key.lower() if isinstance(key, str) else ""
         
         if isinstance(value, str):
-            if is_sensitive_field(key) or any(s in key_lower for s in SENSITIVE_VALUE_FIELDS):
-                if key_lower == "value" and action_type and action_type.lower() not in SENSITIVE_ACTION_TYPES:
+            if key_lower == "thought":
+                result[key] = mask_password_in_thought(value)
+            elif key_lower == "value" and action_type and action_type.lower() in SENSITIVE_ACTION_TYPES:
+                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
+            elif is_sensitive_field(key) or any(s in key_lower for s in SENSITIVE_VALUE_FIELDS):
+                if key_lower == "value":
                     result[key] = value
                 else:
                     result[key] = mask_string(value, show_prefix=1, show_suffix=1)
-            elif len(value) > 10 and any(s in value.lower() for s in ["password", "密码"]):
-                result[key] = mask_string(value, show_prefix=1, show_suffix=1)
             else:
                 result[key] = value
         elif isinstance(value, dict):
@@ -94,19 +101,18 @@ def mask_password_in_thought(thought: str) -> str:
     
     【设计思路】
     只脱敏真正的密码值，不脱敏描述性文本如"密码输入框"、"输入密码"等
-    真正的密码通常格式为：
-    - 密码：'xxx' 或 密码："xxx" 或 密码=xxx
-    - password='xxx' 或 password: "xxx"
+    真正的密码通常紧跟在以下模式后面：
+    - 密码：'xxx' 或 密码："xxx"（带引号的密码）
+    - 输入密码xxx（后面直接跟密码值，但需要排除"输入密码框"等描述）
     """
     import re
     
     patterns = [
         (r"(密码[：:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
-        (r"(密码[：:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
         (r"(password\s*[=:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
-        (r"(password\s*[=:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
         (r"(pwd\s*[=:]\s*['\"])([^'\"]+)(['\"])", r"\1******\3"),
-        (r"(pwd\s*[=:]\s*)(['\"]?)([^\s'\"，,。！？\]\)\}]{4,20})(['\"]?)", r"\1\2******\4"),
+        (r"(输入密码\s*)([A-Za-z0-9!@#$%^&*()_+=\-]{6,20})", r"\1******"),
+        (r"(密码为\s*)([A-Za-z0-9!@#$%^&*()_+=\-]{6,20})", r"\1******"),
     ]
     
     result = thought

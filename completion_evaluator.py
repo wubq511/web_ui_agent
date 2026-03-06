@@ -497,7 +497,7 @@ class CompletionEvaluator:
         default_threshold = PROGRESS_STAGNATION_DEFAULT
         
         if is_done:
-            return CompletionAssessment(
+            assessment = CompletionAssessment(
                 status=CompletionStatus.CONFIRMED_COMPLETE,
                 confidence=1.0,
                 progress_ratio=1.0,
@@ -508,10 +508,12 @@ class CompletionEvaluator:
                 progress_level=ProgressLevel.FULL_PROGRESS,
                 adjusted_stagnation_threshold=stagnation_threshold or default_threshold
             )
+            self.assessment_history.append(assessment)
+            return assessment
         
         done_actions = [e for e in history if e.get("action_type") == "done"]
         if done_actions:
-            return CompletionAssessment(
+            assessment = CompletionAssessment(
                 status=CompletionStatus.CONFIRMED_COMPLETE,
                 confidence=1.0,
                 progress_ratio=1.0,
@@ -522,11 +524,13 @@ class CompletionEvaluator:
                 progress_level=ProgressLevel.FULL_PROGRESS,
                 adjusted_stagnation_threshold=stagnation_threshold or default_threshold
             )
+            self.assessment_history.append(assessment)
+            return assessment
         
         summarize_actions = [e for e in history if e.get("action_type") == "summarize"]
         if summarize_actions:
             self.stagnation_count = 0
-            return CompletionAssessment(
+            assessment = CompletionAssessment(
                 status=CompletionStatus.LIKELY_COMPLETE,
                 confidence=0.85,
                 progress_ratio=0.85,
@@ -537,6 +541,8 @@ class CompletionEvaluator:
                 progress_level=ProgressLevel.SIGNIFICANT_PROGRESS,
                 adjusted_stagnation_threshold=stagnation_threshold or default_threshold
             )
+            self.assessment_history.append(assessment)
+            return assessment
         
         if len(self.assessment_history) == 0:
             self.task_complexity = self.evaluate_task_complexity(objective)

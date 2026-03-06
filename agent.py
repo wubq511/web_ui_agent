@@ -37,6 +37,7 @@ from nodes import (
 )
 from utils import get_api_key
 from model_manager import init_model_manager, get_model_manager
+from security_utils import sanitize_log_message
 
 
 class WebUIAgent:
@@ -1258,6 +1259,8 @@ class WebUIAgent:
                 step = entry.get("step", "?")
                 action = entry.get("action_type", "?")
                 result = entry.get("result", "?")[:50]
+                # 脱敏执行结果中的敏感信息
+                result = sanitize_log_message(result)
                 print(f"   步骤{step}: {action} -> {result}")
             
             print("\n" + self.context.step_manager.get_adjustment_summary())
