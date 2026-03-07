@@ -547,6 +547,10 @@ class ContentExtractor:
         if not unique_products:
             return "未能收集到有效的商品信息。"
         
+        requirements = self._parse_requirements(objective)
+        
+        filtered_products = self._filter_products(unique_products, requirements)
+        
         sorted_by_price = sorted(
             [p for p in unique_products if p.price],
             key=lambda x: self._parse_price(x.price)
@@ -557,26 +561,283 @@ class ContentExtractor:
             ""
         ]
         
-        if sorted_by_price:
-            cheapest = sorted_by_price[0]
-            recommendation_parts.append(f"💰 价格最低: {cheapest.name[:40]} - {cheapest.price}")
-            
-            if len(sorted_by_price) > 1:
-                most_expensive = sorted_by_price[-1]
-                recommendation_parts.append(f"💎 价格最高: {most_expensive.name[:40]} - {most_expensive.price}")
+        if requirements.get("price_min") or requirements.get("price_max"):
+            price_range_str = self._format_price_range(requirements)
+            recommendation_parts.append(f"🎯 您的需求: {price_range_str}")
+            if requirements.get("keywords"):
+                recommendation_parts.append(f"   关键词: {', '.join(requirements['keywords'])}")
+            recommendation_parts.append("")
         
-        sales_products = [p for p in unique_products if p.sales_count]
-        if sales_products:
-            best_seller = max(sales_products, key=lambda x: self._parse_sales(x.sales_count))
-            recommendation_parts.append(f"🔥 销量最高: {best_seller.name[:40]} - 销量: {best_seller.sales_count}")
+        if filtered_products:
+            recommendation_parts.append(f"✅ 符合您需求的商品（{len(filtered_products)} 款）:")
+            recommendation_parts.append("")
+            
+            for i, p in enumerate(filtered_products[:5]):
+                recommendation_parts.append(f"  【推荐{i+1}】{p.name[:35]}")
+                recommendation_parts.append(f"           价格: {p.price}")
+                if p.sales_count:
+                    recommendation_parts.append(f"           销量: {p.sales_count}")
+                recommendation_parts.append("")
+            
+            if len(filtered_products) > 5:
+                recommendation_parts.append(f"  ... 还有 {len(filtered_products) - 5} 款符合条件")
+                recommendation_parts.append("")
+            
+            best_choice = self._select_best_choice(filtered_products, requirements)
+            recommendation_parts.append("💡 最佳推荐:")
+            recommendation_parts.append(f"   {best_choice.name[:40]}")
+            recommendation_parts.append(f"   价格: {best_choice.price}")
+            recommendation_parts.append(f"   推荐理由: {self._get_recommendation_reason(best_choice, requirements, filtered_products)}")
+            recommendation_parts.append("")
+        else:
+            recommendation_parts.append("⚠️ 没有找到完全符合您需求的商品")
+            recommendation_parts.append("")
+            
+            if sorted_by_price:
+                closest = self._find_closest_match(sorted_by_price, requirements)
+                if closest:
+                    recommendation_parts.append("💡 最接近您需求的商品:")
+                    recommendation_parts.append(f"   {closest.name[:40]}")
+                    recommendation_parts.append(f"   价格: {closest.price}")
+                    recommendation_parts.append("")
         
         recommendation_parts.extend([
-            "",
-            "📊 商品列表:",
+            "📊 全部商品列表:",
             self._format_products_list(unique_products[:10])
         ])
         
+        if sorted_by_price:
+            recommendation_parts.extend([
+                "",
+                "📈 价格分布:",
+                f"   💰 价格最低: {sorted_by_price[0].name[:30]} - {sorted_by_price[0].price}"
+            ])
+            if len(sorted_by_price) > 1:
+                recommendation_parts.append(f"   💎 价格最高: {sorted_by_price[-1].name[:30]} - {sorted_by_price[-1].price}")
+        
         return "\n".join(recommendation_parts)
+    
+    def _parse_requirements(self, objective: str) -> dict:
+        """
+        解析用户需求
+        
+        【参数】
+        objective: 用户目标描述
+        
+        【返回值】
+        dict: 需求字典
+        """
+        requirements = {
+            "price_min": None,
+            "price_max": None,
+            "keywords": [],
+            "brand": None
+        }
+        
+        if not objective:
+            return requirements
+        
+        objective_lower = objective.lower()
+        
+        price_patterns = [
+            (r'(\d+)-(\d+)[元块]', lambda m: (float(m.group(1)), float(m.group(2)))),
+            (r'(\d+)[元块]?[-到至](\d+)', lambda m: (float(m.group(1)), float(m.group(2)))),
+            (r'(\d+)到(\d+)', lambda m: (float(m.group(1)), float(m.group(2)))),
+            (r'(\d+)-(\d+)', lambda m: (float(m.group(1)), float(m.group(2)))),
+            (r'(\d+)左右', lambda m: (float(m.group(1)) * 0.8, float(m.group(1)) * 1.2)),
+            (r'(\d+)以内', lambda m: (0, float(m.group(1)))),
+            (r'不超过(\d+)', lambda m: (0, float(m.group(1)))),
+            (r'低于(\d+)', lambda m: (0, float(m.group(1)))),
+        ]
+        
+        for pattern, extractor in price_patterns:
+            match = re.search(pattern, objective)
+            if match:
+                try:
+                    price_min, price_max = extractor(match)
+                    requirements["price_min"] = price_min
+                    requirements["price_max"] = price_max
+                    break
+                except:
+                    pass
+        
+        brands = ["苹果", "华为", "小米", "oppo", "vivo", "荣耀", "三星", "一加", "realme", "红米", "iphone"]
+        for brand in brands:
+            if brand in objective_lower:
+                requirements["brand"] = brand
+                break
+        
+        feature_keywords = [
+            "拍照", "摄影", "影像", "游戏", "性能", "续航", "屏幕", "折叠",
+            "5g", "高刷", "快充", "防水", "轻薄", "大屏", "小屏"
+        ]
+        for kw in feature_keywords:
+            if kw in objective_lower:
+                requirements["keywords"].append(kw)
+        
+        return requirements
+    
+    def _filter_products(self, products: List[ProductInfo], requirements: dict) -> List[ProductInfo]:
+        """
+        根据需求筛选商品
+        
+        【参数】
+        products: 商品列表
+        requirements: 需求字典
+        
+        【返回值】
+        List[ProductInfo]: 筛选后的商品列表
+        """
+        filtered = []
+        
+        for p in products:
+            if not p.price:
+                continue
+            
+            price = self._parse_price(p.price)
+            if price == float('inf'):
+                continue
+            
+            if requirements.get("price_min") and price < requirements["price_min"]:
+                continue
+            if requirements.get("price_max") and price > requirements["price_max"]:
+                continue
+            
+            if requirements.get("brand"):
+                if requirements["brand"].lower() not in p.name.lower():
+                    continue
+            
+            if requirements.get("keywords"):
+                name_lower = p.name.lower()
+                matched_keywords = [kw for kw in requirements["keywords"] if kw in name_lower]
+                if not matched_keywords:
+                    pass
+            
+            filtered.append(p)
+        
+        return filtered
+    
+    def _select_best_choice(self, products: List[ProductInfo], requirements: dict) -> ProductInfo:
+        """
+        选择最佳推荐
+        
+        【参数】
+        products: 筛选后的商品列表
+        requirements: 需求字典
+        
+        【返回值】
+        ProductInfo: 最佳推荐商品
+        """
+        if not products:
+            return None
+        
+        if len(products) == 1:
+            return products[0]
+        
+        scored_products = []
+        for p in products:
+            score = 0
+            price = self._parse_price(p.price)
+            
+            if requirements.get("price_min") and requirements.get("price_max"):
+                mid_price = (requirements["price_min"] + requirements["price_max"]) / 2
+                price_diff = abs(price - mid_price)
+                score -= price_diff / 100
+            
+            if requirements.get("keywords"):
+                name_lower = p.name.lower()
+                for kw in requirements["keywords"]:
+                    if kw in name_lower:
+                        score += 10
+            
+            if p.sales_count:
+                sales = self._parse_sales(p.sales_count)
+                score += min(sales / 1000, 20)
+            
+            scored_products.append((p, score))
+        
+        scored_products.sort(key=lambda x: x[1], reverse=True)
+        return scored_products[0][0]
+    
+    def _find_closest_match(self, products: List[ProductInfo], requirements: dict) -> ProductInfo:
+        """
+        找到最接近需求的商品
+        
+        【参数】
+        products: 商品列表
+        requirements: 需求字典
+        
+        【返回值】
+        ProductInfo: 最接近的商品
+        """
+        if not products:
+            return None
+        
+        if not requirements.get("price_min") and not requirements.get("price_max"):
+            return products[0]
+        
+        target_price = requirements.get("price_max") or requirements.get("price_min") or 0
+        
+        closest = None
+        min_diff = float('inf')
+        
+        for p in products:
+            price = self._parse_price(p.price)
+            if price == float('inf'):
+                continue
+            
+            diff = abs(price - target_price)
+            if diff < min_diff:
+                min_diff = diff
+                closest = p
+        
+        return closest
+    
+    def _format_price_range(self, requirements: dict) -> str:
+        """格式化价格范围描述"""
+        price_min = requirements.get("price_min")
+        price_max = requirements.get("price_max")
+        
+        if price_min and price_max:
+            return f"价格范围 ¥{int(price_min)}-{int(price_max)}"
+        elif price_max:
+            return f"价格不超过 ¥{int(price_max)}"
+        elif price_min:
+            return f"价格不低于 ¥{int(price_min)}"
+        return ""
+    
+    def _get_recommendation_reason(self, product: ProductInfo, requirements: dict, all_filtered: List[ProductInfo]) -> str:
+        """生成推荐理由"""
+        reasons = []
+        
+        price = self._parse_price(product.price)
+        
+        if requirements.get("price_min") and requirements.get("price_max"):
+            mid_price = (requirements["price_min"] + requirements["price_max"]) / 2
+            if abs(price - mid_price) < (requirements["price_max"] - requirements["price_min"]) / 4:
+                reasons.append("价格处于您预算的中间位置，性价比高")
+            elif price <= requirements["price_min"] + (requirements["price_max"] - requirements["price_min"]) * 0.3:
+                reasons.append("价格较低，预算友好")
+        
+        if requirements.get("keywords"):
+            matched = [kw for kw in requirements["keywords"] if kw in product.name.lower()]
+            if matched:
+                reasons.append(f"符合您对{'/'.join(matched)}的需求")
+        
+        if product.sales_count:
+            sales = self._parse_sales(product.sales_count)
+            if sales >= 10000:
+                reasons.append("销量高，市场认可度好")
+        
+        if len(all_filtered) > 1:
+            sorted_by_price = sorted(all_filtered, key=lambda x: self._parse_price(x.price))
+            if product == sorted_by_price[0]:
+                reasons.append("是符合条件中价格最低的")
+        
+        if not reasons:
+            reasons.append("综合各项指标表现优秀")
+        
+        return "；".join(reasons)
     
     def _format_products_list(self, products: List[ProductInfo]) -> str:
         """格式化商品列表"""

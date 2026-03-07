@@ -273,9 +273,9 @@ def _escape_css_selector(selector: str) -> str:
     我们需要将其转换为属性选择器 [id="xxx"] 或使用 CSS 转义。
     
     【转义策略】
-    1. 如果是 ID 选择器（#开头），检查 ID 是否有效
-    2. 如果 ID 无效，转换为属性选择器 [id="xxx"]
-    3. 对于其他情况，保持原样
+    1. 只有当选择器是纯 ID 选择器（#开头，不含空格等组合符）时才处理
+    2. 对于组合选择器（如 "#search input"），不进行转换
+    3. 如果 ID 无效，转换为属性选择器 [id="xxx"]
     
     【参数】
     selector: str - 原始 CSS 选择器
@@ -288,6 +288,9 @@ def _escape_css_selector(selector: str) -> str:
     
     if selector.startswith('#'):
         id_value = selector[1:]
+        
+        if ' ' in id_value or '>' in id_value or '+' in id_value or '~' in id_value:
+            return selector
         
         if not _is_valid_css_id(id_value):
             escaped_id = id_value.replace('\\', '\\\\').replace('"', '\\"')

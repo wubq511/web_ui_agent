@@ -3858,6 +3858,44 @@ def action_node(state: AgentState, page: Page, context: AgentContext) -> dict:
                     else:
                         raise ValueError(message)
                 
+                is_input_element = element_info.get("is_input", False)
+                element_type = element_info.get("type", "")
+                selector = element_info.get("selector", "")
+                
+                if not is_input_element and element_type not in ["input", "textarea"]:
+                    print(f"   ⚠️ 目标元素不是输入框 (type={element_type})，尝试查找内部输入框...")
+                    
+                    inner_input_selectors = [
+                        "input[type='text']",
+                        "input:not([type])",
+                        "input[type='search']",
+                        "textarea",
+                        "input[class*='search']",
+                        "input[id*='key']",
+                        "input[id*='search']",
+                        "input[id*='keyword']",
+                        "#key",
+                        ".text"
+                    ]
+                    
+                    found_input = False
+                    for inner_sel in inner_input_selectors:
+                        try:
+                            combined_selector = f"{selector} {inner_sel}"
+                            inner_locator = page.locator(combined_selector).first
+                            if inner_locator.is_visible(timeout=500):
+                                print(f"   ✅ 找到内部输入框: {combined_selector}")
+                                element_info["selector"] = combined_selector
+                                element_info["is_input"] = True
+                                element_info["type"] = "input"
+                                found_input = True
+                                break
+                        except Exception:
+                            continue
+                    
+                    if not found_input:
+                        print(f"   ❌ 未找到内部输入框，尝试直接操作容器...")
+                
                 locator = _get_locator(page, element_info)
                 if not locator:
                     raise ValueError("无法定位元素")
