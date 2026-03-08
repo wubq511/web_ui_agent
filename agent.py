@@ -149,7 +149,7 @@ class WebUIAgent:
     def _init_browser(self, storage_state: dict = None):
         """
         初始化浏览器
-
+       
         【设计思路】
         支持两种浏览器模式：
         

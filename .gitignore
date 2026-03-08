@@ -17,6 +17,9 @@ checkpoints/
 # 流程记录（可能包含敏感操作记录）
 process/
 
+# 截图文件（可能包含敏感信息）
+screenshots/
+
 # 备份文件
 backups/
 *.backup

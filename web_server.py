@@ -248,8 +248,15 @@ class AgentStateManager:
         
         Args:
             line: 输出行内容
-            line_type: 行类型 (output, error, input, prompt, system)
+            line_type: 行类型 (output, error, warning, success, input, prompt, system, debug)
+        
+        Note:
+            debug 类型的输出不会显示在前端终端，但会在后端日志中保留
         """
+        # 过滤 debug 类型输出，不显示在前端终端
+        if line_type == "debug":
+            return
+        
         line_entry = {
             "id": f"{datetime.now().timestamp()}-{len(self.terminal_lines)}",
             "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -1174,16 +1181,37 @@ class AgentStateManager:
             line: 输出行内容
             
         Returns:
-            行类型: output, error, warning, info, prompt
+            行类型: output, error, warning, info, prompt, debug
         """
         line_lower = line.lower()
         
+        # 首先检测调试信息（优先级最高，过滤掉不显示在前端）
+        debug_prefixes = ['[调试]', '[parse]', '[websocket]', '[screenshot]', '[command]', '[debug]']
+        if any(prefix in line_lower for prefix in debug_prefixes):
+            return "debug"
+        
+        # 检测详细检测过程（调试信息）
+        debug_keywords = [
+            '检测到登录iframe', '检测到登录弹窗元素', '检测到遮罩层',
+            '检测到弹窗内元素', '检测到验证码元素', '检测到短信验证码输入框',
+            '检测到收件人输入框', '检测到主题输入框', '检测到邮件正文编辑器',
+            '选择器修复', 'frame 定位', '定位策略',
+            '值匹配但存在空白差异', '值被截断', '期望值是实际值的子集',
+            'screenshot stream', 'screenshot loop', 'browser listeners'
+        ]
+        if any(kw in line_lower for kw in debug_keywords):
+            return "debug"
+        
+        # 检测错误信息
         if any(kw in line_lower for kw in ['error', '错误', 'failed', 'exception']):
             return "error"
+        # 检测警告信息
         elif any(kw in line_lower for kw in ['warning', '警告', 'warn']):
             return "warning"
+        # 检测成功信息
         elif any(kw in line_lower for kw in ['success', '成功', 'completed', '完成']):
             return "success"
+        # 检测输入提示
         elif any(kw in line_lower for kw in ['password', '密码', 'input', 'enter', '请输入']):
             return "prompt"
         else:
