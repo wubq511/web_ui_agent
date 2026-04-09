@@ -43,11 +43,14 @@ python main.py --objective "在淘宝搜索笔记本电脑" --url "https://www.t
 python main.py -o "购买 iPhone" -u "https://www.apple.com.cn" -m 50
 """
 
-import os
 import argparse
 
-from config import ENV_API_KEY_NAME, AVAILABLE_MODELS, DEFAULT_MODEL, AUTO_SWITCH_TARGET_MODEL
 from agent import WebUIAgent
+from llm_config_store import (
+    get_available_model_catalog,
+    get_default_model_id,
+    get_model_config,
+)
 from output_handler import reset_output_handler
 
 
@@ -81,92 +84,76 @@ def create_parser() -> argparse.ArgumentParser:
   models           - 列出所有可用模型
   switch <model>   - 切换到指定模型
   help (h/?)       - 显示此帮助
-        """
+        """,
     )
-    
+
     parser.add_argument(
-        "-o", "--objective",
+        "-o",
+        "--objective",
         type=str,
         default="""用我的126邮箱发邮件给wbq20071104@163.com,正文：晚上好
         """,
-        help="任务目标描述 (默认: 无)"
+        help="任务目标描述 (默认: 无)",
     )
-    
+
     parser.add_argument(
-        "-u", "--url",
+        "-u",
+        "--url",
         type=str,
         default="https://www.baidu.com",
-        help="起始页面URL (默认: 百度)"
+        help="起始页面URL (默认: 百度)",
     )
-    
+
     parser.add_argument(
-        "-m", "--max-steps",
-        type=int,
-        default=30,
-        help="最大步骤数 (默认: 30)"
+        "-m", "--max-steps", type=int, default=30, help="最大步骤数 (默认: 30)"
     )
-    
+
     parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="任务完成后自动关闭浏览器"
+        "--no-browser", action="store_true", help="任务完成后自动关闭浏览器"
     )
-    
+
     parser.add_argument(
-        "--list-checkpoints",
-        action="store_true",
-        help="列出可用的检查点"
+        "--list-checkpoints", action="store_true", help="列出可用的检查点"
     )
-    
+
     parser.add_argument(
-        "-r", "--resume",
+        "-r",
+        "--resume",
         type=str,
         default=None,
         metavar="CHECKPOINT_ID",
-        help="从指定检查点恢复任务"
+        help="从指定检查点恢复任务",
     )
-    
-    parser.add_argument(
-        "--cleanup",
-        action="store_true",
-        help="清理过期检查点"
-    )
-    
+
+    parser.add_argument("--cleanup", action="store_true", help="清理过期检查点")
+
     parser.add_argument(
         "--max-age",
         type=int,
         default=24,
-        help="清理检查点的最大保留时间(小时) (默认: 24)"
+        help="清理检查点的最大保留时间(小时) (默认: 24)",
     )
-    
+
     parser.add_argument(
-        "--keep-count",
-        type=int,
-        default=5,
-        help="清理时保留的最少检查点数 (默认: 5)"
+        "--keep-count", type=int, default=5, help="清理时保留的最少检查点数 (默认: 5)"
     )
-    
+
     parser.add_argument(
         "--model",
         type=str,
         default=None,
-        choices=list(AVAILABLE_MODELS.keys()),
-        help=f"指定使用的模型 (默认: {DEFAULT_MODEL})"
+        help="指定使用的模型ID（留空时使用第一条启用的自定义模型配置）",
     )
-    
-    parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="列出所有可用模型"
-    )
-    
+
+    parser.add_argument("--list-models", action="store_true", help="列出所有可用模型")
+
     return parser
 
 
 def main():
     """
     主函数 - 程序入口
-    
+
     【执行流程】
     1. 解析命令行参数
     2. 检查环境变量
@@ -175,54 +162,68 @@ def main():
     """
     parser = create_parser()
     args = parser.parse_args()
-    
-    print("\n" + "╔"+"═"*58+"╗")
-    print("║" + " "*15 + "Web UI Agent 启动程序" + " "*21 + "║")
-    print("╚"+"═"*58+"╝\n")
-    
-    print("📌 正在检查环境变量...")
-    api_key = os.environ.get(ENV_API_KEY_NAME)
-    if not api_key:
-        print(f"⚠️ 未检测到 {ENV_API_KEY_NAME} 环境变量")
-        print("请设置环境变量后重试。")
-        print("\nWindows PowerShell 设置方法:")
-        print('  $env:LINGYAAI_API_KEY="你的API密钥"')
+
+    print("\n" + "╔" + "═" * 58 + "╗")
+    print("║" + " " * 15 + "Web UI Agent 启动程序" + " " * 21 + "║")
+    print("╚" + "═" * 58 + "╝\n")
+
+    print("📌 正在检查自定义模型配置...")
+    requested_model = args.model or get_default_model_id()
+    if not requested_model:
+        print("❌ 当前没有可用的自定义模型配置")
+        print("请先在前端 API CONFIG 中添加并启用至少一条自定义 Provider 配置。")
         return 1
-    print("✅ 环境变量检查通过\n")
-    
+
+    selected_model_config = get_model_config(requested_model, include_secret=True)
+    if not selected_model_config:
+        print(f"❌ 未知模型: {requested_model}")
+        return 1
+
+    if not selected_model_config.get("api_key"):
+        print("❌ 当前模型缺少 API Key")
+        print("请在前端 API CONFIG 中补全该自定义模型的密钥。")
+        return 1
+    if not selected_model_config.get("api_base"):
+        print("❌ 当前模型缺少 Base URL")
+        print("请在前端 API CONFIG 中补全该自定义模型的 Base URL。")
+        return 1
+    print("✅ 自定义模型配置检查通过\n")
+
     reset_output_handler()
-    
+
     if args.list_models:
         print("\n📋 可用模型列表:")
         print("=" * 60)
-        for model_id, config in AVAILABLE_MODELS.items():
-            is_default = " (默认)" if model_id == DEFAULT_MODEL else ""
-            is_auto = " [支持自动切换]" if config.get("supports_auto_switch", False) else " [仅手动切换]"
+        for model_id, config in get_available_model_catalog(
+            include_secrets=False
+        ).items():
+            is_default = " (默认)" if model_id == requested_model else ""
+            is_auto = " [自定义配置]"
             print(f"\n  {model_id}{is_default}{is_auto}")
             print(f"    名称: {config['name']}")
             print(f"    描述: {config['description']}")
             print(f"    标签: {', '.join(config['tags'])}")
         print("\n" + "=" * 60)
         print(f"💡 使用 --model <模型ID> 指定初始模型")
-        print(f"💡 自动切换仅切换到 {AUTO_SWITCH_TARGET_MODEL}（最强模型）")
         return 0
-    
+
     try:
         agent = WebUIAgent(model=args.model)
-        
+
         if args.list_checkpoints:
             print("\n📋 可用的检查点:")
             agent.list_checkpoints(limit=10)
             return 0
-        
+
         if args.cleanup:
-            print(f"\n🧹 清理过期检查点 (保留 {args.max_age} 小时内的, 至少保留 {args.keep_count} 个)...")
+            print(
+                f"\n🧹 清理过期检查点 (保留 {args.max_age} 小时内的, 至少保留 {args.keep_count} 个)..."
+            )
             agent.cleanup_old_checkpoints(
-                max_age_hours=args.max_age,
-                keep_count=args.keep_count
+                max_age_hours=args.max_age, keep_count=args.keep_count
             )
             return 0
-        
+
         if args.resume:
             print(f"\n📂 从检查点恢复: {args.resume}")
             if args.max_steps:
@@ -231,27 +232,27 @@ def main():
                 objective=args.objective,
                 resume_from_checkpoint=args.resume,
                 max_steps=args.max_steps,
-                keep_browser_open=not args.no_browser
+                keep_browser_open=not args.no_browser,
             )
         else:
             print(f"\n🎯 任务目标: {args.objective}")
             print(f"🌐 起始页面: {args.url}")
             if args.max_steps:
                 print(f"📊 最大步骤: {args.max_steps}")
-            
+
             agent.run(
                 objective=args.objective,
                 start_url=args.url,
                 max_steps=args.max_steps,
-                keep_browser_open=not args.no_browser
+                keep_browser_open=not args.no_browser,
             )
-        
-        print("\n" + "╔"+"═"*58+"╗")
-        print("║" + " "*18 + "程序执行完毕" + " "*24 + "║")
-        print("╚"+"═"*58+"╝\n")
-        
+
+        print("\n" + "╔" + "═" * 58 + "╗")
+        print("║" + " " * 18 + "程序执行完毕" + " " * 24 + "║")
+        print("╚" + "═" * 58 + "╝\n")
+
         return 0
-        
+
     except ValueError as e:
         print(f"\n❌ 配置错误: {e}")
         return 1

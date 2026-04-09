@@ -18,7 +18,7 @@
  * ================================================================================
  */
 
-import type { AgentState, LogEntry, FileInfo, TaskGroup, FileContentResponse } from '../types';
+import type { AgentState, LogEntry, FileInfo, TaskGroup, FileContentResponse, CustomLlmConfig, CustomLlmConfigInput, ModelConfig } from '../types';
 
 // API 基础 URL
 const API_BASE_URL = 'http://localhost:8000';
@@ -181,8 +181,32 @@ class ApiClient {
   /**
    * 获取可用模型列表
    */
-  async getAvailableModels(): Promise<{ id: string; name: string; description: string }[]> {
+  async getAvailableModels(): Promise<ModelConfig[]> {
     return this.request('/api/models');
+  }
+
+  async getCustomLlmConfigs(): Promise<{ configs: CustomLlmConfig[] }> {
+    return this.request('/api/llm-configs');
+  }
+
+  async createCustomLlmConfig(payload: CustomLlmConfigInput): Promise<{ success: boolean; config: CustomLlmConfig }> {
+    return this.request('/api/llm-configs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateCustomLlmConfig(configId: string, payload: Partial<CustomLlmConfigInput>): Promise<{ success: boolean; config: CustomLlmConfig }> {
+    return this.request(`/api/llm-configs/${configId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteCustomLlmConfig(configId: string): Promise<{ success: boolean; message: string }> {
+    return this.request(`/api/llm-configs/${configId}`, {
+      method: 'DELETE',
+    });
   }
 
   /**
@@ -199,7 +223,7 @@ class ApiClient {
     objective: string = '',
     url: string = '',
     maxSteps: number = 30,
-    model: string = 'gemini-3-flash-preview'
+    model: string = ''
   ): Promise<{ success: boolean; message: string; command?: string }> {
     return this.request('/api/command/execute', {
       method: 'POST',

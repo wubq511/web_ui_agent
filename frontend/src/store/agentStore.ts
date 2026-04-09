@@ -42,58 +42,7 @@ import type { AgentState, AgentStatus, ModelConfig } from '../types';
  * - doubao-1.6-pro: 多模态能力强
  * - minimax-text-01: 长文本处理能力强
  */
-export const AVAILABLE_MODELS: ModelConfig[] = [
-  {
-    id: 'gemini-3-flash-preview',
-    name: 'Gemini 3 Flash Preview',
-    description: 'Google Gemini 3 Flash 预览版，速度快，成本低',
-    priority: 1,
-    tags: ['fast', 'cost-effective', 'general'],
-    maxTokens: 8192,
-    supportsVision: false,
-    supportsAutoSwitch: true,
-  },
-  {
-    id: 'kimi-k2.5',
-    name: 'Kimi K2.5',
-    description: '月之暗面 Kimi K2.5，中文理解能力强，agent能力强',
-    priority: 2,
-    tags: ['chinese', 'reasoning', 'long-context'],
-    maxTokens: 8192,
-    supportsVision: false,
-    supportsAutoSwitch: true,
-  },
-  {
-    id: 'claude-opus-4-6',
-    name: 'Claude Opus 4.6',
-    description: 'Anthropic Claude Opus 4.6，最强agent模型，推理能力最强',
-    priority: 3,
-    tags: ['reasoning', 'complex-tasks', 'safety'],
-    maxTokens: 4096,
-    supportsVision: false,
-    supportsAutoSwitch: true,
-  },
-  {
-    id: 'doubao-seed-2-0-pro',
-    name: 'Doubao Seed 2.0 Pro',
-    description: '字节跳动豆包 Seed 2.0 Pro，性价比高',
-    priority: 4,
-    tags: ['chinese', 'cost-effective', 'fast'],
-    maxTokens: 8192,
-    supportsVision: false,
-    supportsAutoSwitch: true,
-  },
-  {
-    id: 'minimax-m2.5',
-    name: 'MiniMax M2.5',
-    description: 'MiniMax M2.5，创意能力强',
-    priority: 5,
-    tags: ['creative', 'chinese', 'reasoning'],
-    maxTokens: 8192,
-    supportsVision: false,
-    supportsAutoSwitch: true,
-  },
-];
+export const AVAILABLE_MODELS: ModelConfig[] = [];
 
 /**
  * Agent 初始状态

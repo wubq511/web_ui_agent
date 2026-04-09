@@ -77,6 +77,35 @@ export interface ModelConfig {
   maxTokens: number;
   supportsVision: boolean;
   supportsAutoSwitch: boolean;
+  source?: 'builtin' | 'custom';
+  provider?: string;
+}
+
+export interface CustomLlmConfig {
+  id: string;
+  display_name: string;
+  provider: string;
+  model_name: string;
+  base_url: string;
+  api_key_masked: string;
+  description: string;
+  max_tokens: number;
+  supports_vision: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomLlmConfigInput {
+  display_name: string;
+  provider: string;
+  model_name: string;
+  base_url: string;
+  api_key: string;
+  description?: string;
+  max_tokens?: number;
+  supports_vision?: boolean;
+  enabled?: boolean;
 }
 
 /**

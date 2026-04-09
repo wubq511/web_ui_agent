@@ -19,6 +19,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Loader2, Terminal, AlertCircle, CheckCircle, Info, XCircle } from 'lucide-react';
 import { useTerminal } from '../store/terminalStore';
 import { apiClient } from '../services/api';
+import HudPanel from './HudPanel';
 import type { TerminalLine } from '../types';
 
 /**
@@ -34,13 +35,13 @@ const TerminalLineItem: React.FC<{ line: TerminalLine }> = ({ line }) => {
       case 'success':
         return 'text-green-400 bg-green-500/10';
       case 'prompt':
-        return 'text-cyan-400 bg-cyan-500/10 font-medium';
+        return 'text-[#00E5FF] bg-cyan-500/10 font-medium';
       case 'input':
         return 'text-blue-400 bg-blue-500/10';
       case 'system':
-        return 'text-slate-400 bg-slate-500/10 italic';
+        return 'text-[#94A3B8] bg-slate-500/10 italic';
       default:
-        return 'text-slate-300';
+        return 'text-[#94A3B8]';
     }
   };
 
@@ -64,7 +65,7 @@ const TerminalLineItem: React.FC<{ line: TerminalLine }> = ({ line }) => {
   return (
     <div className={`flex items-start gap-2 px-3 py-1.5 ${getLineStyle()}`}>
       {getLineIcon()}
-      <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">
+      <span className="text-[10px] text-[#64748B] font-mono flex-shrink-0">
         {line.timestamp}
       </span>
       <span className="text-sm font-mono break-all whitespace-pre-wrap">
@@ -141,41 +142,39 @@ const InteractiveTerminal: React.FC = () => {
   }, [handleSubmit]);
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 bg-slate-900/50">
-        <div className="flex items-center gap-2">
-          <Terminal className="w-4 h-4 text-slate-400" />
-          <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-            Interactive Terminal
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
+    <HudPanel
+      title="Interactive Terminal"
+      icon={<Terminal className="w-4 h-4" />}
+      className="h-full"
+      bodyClassName="flex flex-col"
+      headerActions={
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
           {isProcessing && (
             <div className="flex items-center gap-1.5 text-xs text-yellow-400">
               <Loader2 className="w-3 h-3 animate-spin" />
-              <span>Processing...</span>
+              <span className="font-mono">Processing...</span>
             </div>
           )}
           {waitingForInput && (
-            <div className="flex items-center gap-1.5 text-xs text-cyan-400 animate-pulse">
-              <span>Waiting for input</span>
+            <div className="flex items-center gap-1.5 text-xs text-[#00E5FF] animate-pulse">
+              <span className="font-mono">Waiting for input</span>
             </div>
           )}
           <button
             onClick={clearTerminal}
-            className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            className="text-xs font-mono text-[#64748B] hover:text-[#94A3B8] transition-colors"
           >
-            Clear
+            CLEAR
           </button>
         </div>
-      </div>
-
+      }
+    >
       <div
         ref={terminalRef}
-        className="flex-1 overflow-y-auto bg-slate-950/80 font-mono text-sm"
+        className="flex-1 overflow-y-auto bg-transparent font-mono text-sm"
       >
         {lines.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-slate-600">
+          <div className="flex items-center justify-center h-full text-[#475569]">
             <div className="text-center">
               <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
               <p className="text-xs">Terminal output will appear here</p>
@@ -191,10 +190,10 @@ const InteractiveTerminal: React.FC = () => {
       </div>
 
       {waitingForInput && (
-        <div className="border-t border-cyan-500/30 bg-cyan-500/5 p-3">
+        <div className="border-t border-[#00E5FF]/30 bg-[#00E5FF]/5 p-3">
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-            <span className="text-xs text-cyan-400 font-medium">
+            <div className="w-2 h-2 rounded-full bg-[#00E5FF] animate-pulse" />
+            <span className="text-xs text-[#00E5FF] font-medium">
               {inputPrompt || 'Please enter your input:'}
             </span>
           </div>
@@ -206,7 +205,7 @@ const InteractiveTerminal: React.FC = () => {
               onChange={(e) => setUserInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={isPassword ? '••••••••' : 'Type your input...'}
-              className="flex-1 px-3 py-2 rounded-lg bg-slate-900/80 border border-cyan-500/30 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/20 transition-all"
+              className="flex-1 min-w-[120px] w-full sm:w-auto px-3 py-2 rounded-lg bg-black/60 border border-[#00E5FF]/30 text-sm text-[#E2E8F0] placeholder-slate-500 focus:outline-none focus:border-[#00E5FF] focus:ring-1 focus:ring-[#00E5FF]/20 transition-all"
               disabled={isSubmitting}
             />
             <button
@@ -214,8 +213,8 @@ const InteractiveTerminal: React.FC = () => {
               disabled={isSubmitting}
               className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg font-medium text-xs uppercase tracking-wider transition-all duration-200 ${
                 isSubmitting
-                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                  : 'bg-gradient-to-r from-cyan-600 to-cyan-500 text-white hover:from-cyan-500 hover:to-cyan-400 shadow-lg shadow-cyan-500/25'
+                  ? 'bg-slate-800 text-[#64748B] cursor-not-allowed'
+                  : 'bg-gradient-to-r from-[#00E5FF]/80 to-[#00E5FF]/50 text-white hover:from-[#00E5FF] hover:to-[#00E5FF]/80 shadow-lg shadow-[#00E5FF]/25'
               }`}
             >
               {isSubmitting ? (
@@ -226,12 +225,12 @@ const InteractiveTerminal: React.FC = () => {
               Send
             </button>
           </div>
-          <p className="text-[10px] text-slate-500 mt-1.5">
+          <p className="text-[10px] text-[#64748B] mt-1.5">
             Press Enter to submit or click Send button
           </p>
         </div>
       )}
-    </div>
+    </HudPanel>
   );
 };
 

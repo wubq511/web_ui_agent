@@ -17,92 +17,133 @@ Agent 模块 - WebUIAgent 类实现
 ================================================================================
 """
 
+from typing import Optional
+
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
-from playwright.sync_api import sync_playwright, Page, Browser, Playwright, BrowserContext
+from playwright.sync_api import (
+    sync_playwright,
+    Page,
+    Browser,
+    Playwright,
+    BrowserContext,
+)
 
 from config import (
-    API_BASE_URL, MODEL_NAME, LLM_TIMEOUT, LLM_TEMPERATURE,
-    ACTION_TIMEOUT, PAGE_LOAD_TIMEOUT, MAX_STEPS,
-    DEFAULT_TASK_COMPLEXITY, DEFAULT_PROGRESS_LEVEL,
-    PROGRESS_STAGNATION_DEFAULT, DEFAULT_INTERVENTION_PAUSED,
-    DEFAULT_FAST_MODE, DEFAULT_STEPS_EXTENSION, MIN_REMAINING_STEPS_THRESHOLD,
-    PROXY_SERVER, LOCAL_CHROME_PATH, LOCAL_CHROME_USER_DATA_DIR,
-    AVAILABLE_MODELS, DEFAULT_MODEL
+    API_BASE_URL,
+    MODEL_NAME,
+    LLM_TIMEOUT,
+    LLM_TEMPERATURE,
+    ACTION_TIMEOUT,
+    PAGE_LOAD_TIMEOUT,
+    MAX_STEPS,
+    DEFAULT_TASK_COMPLEXITY,
+    DEFAULT_PROGRESS_LEVEL,
+    PROGRESS_STAGNATION_DEFAULT,
+    DEFAULT_INTERVENTION_PAUSED,
+    DEFAULT_FAST_MODE,
+    DEFAULT_STEPS_EXTENSION,
+    MIN_REMAINING_STEPS_THRESHOLD,
+    PROXY_SERVER,
+    LOCAL_CHROME_PATH,
+    LOCAL_CHROME_USER_DATA_DIR,
+    DEFAULT_MODEL,
 )
 from state import AgentState, create_initial_state
 from nodes import (
-    perception_node, reasoning_node, action_node, should_continue,
-    AgentContext
+    perception_node,
+    reasoning_node,
+    action_node,
+    should_continue,
+    AgentContext,
 )
-from utils import get_api_key
 from model_manager import init_model_manager, get_model_manager
+from llm_config_store import get_default_model_id, get_model_config
 from security_utils import sanitize_log_message
 
 
 class WebUIAgent:
     """
     WebUIAgent - Web UI 自动化代理类
-    
+
     【使用示例】
     ```python
     agent = WebUIAgent()
     agent.run("在百度搜索 LangGraph 教程")
     ```
     """
-    
-    def __init__(self, model: str = None):
+
+    def __init__(self, model: Optional[str] = None):
         """
         初始化 Agent
-        
+
         【工作流程】
         1. 获取并验证 API 密钥
         2. 初始化模型管理器（支持多模型切换）
         3. 构建状态图
-        
+
         【参数】
         model: 指定初始模型，为None则使用默认模型
         """
         print("🚀 正在初始化 Web UI Agent...")
-        
-        api_key = get_api_key()
-        print("✅ API 密钥验证通过")
-        
-        self.model_manager = init_model_manager(api_key)
-        
-        if model and model in AVAILABLE_MODELS:
+
+        selected_model = model or get_default_model_id()
+        if not selected_model:
+            raise ValueError(
+                "当前没有可用的自定义模型配置，请先在前端 API CONFIG 中添加并启用配置"
+            )
+        selected_model_config = get_model_config(selected_model, include_secret=True)
+        if not selected_model_config:
+            raise ValueError(f"未知模型配置: {selected_model}")
+
+        if not selected_model_config.get("api_key"):
+            raise ValueError(
+                "当前模型缺少可用的 API Key，请在 API CONFIG 中补全该自定义配置"
+            )
+        if not selected_model_config.get("api_base"):
+            raise ValueError(
+                "当前模型缺少可用的 Base URL，请在 API CONFIG 中补全该自定义配置"
+            )
+
+        print("✅ 自定义 API 配置验证通过")
+
+        self.model_manager = init_model_manager(None)
+
+        if model is not None:
             self.model_manager.set_initial_model(model)
-        
+
         current_model = self.model_manager.get_current_model()
         initial_model = self.model_manager.get_initial_model()
-        model_info = AVAILABLE_MODELS.get(current_model, {})
+        model_info = get_model_config(current_model, include_secret=False) or {}
         print(f"✅ 模型管理器已初始化")
         print(f"   初始模型: {initial_model}")
         print(f"   当前模型: {current_model}")
         print(f"   模型名称: {model_info.get('name', '未知')}")
-        print(f"   可切换模型: {', '.join(AVAILABLE_MODELS.keys())}")
-        
+        print(
+            f"   可切换模型: {', '.join(self.model_manager.get_available_models().keys())}"
+        )
+
         self.playwright: Playwright = None
         self.browser: Browser = None
         self.browser_context: BrowserContext = None
         self.page: Page = None
 
         self.context = AgentContext()
-        
+
         self.graph = self._build_graph()
         print("✅ 状态图构建完成")
-    
+
     def _build_graph(self) -> StateGraph:
         """
         构建 LangGraph 状态图
-        
+
         【设计思路】
         LangGraph 使用状态图（StateGraph）来定义 Agent 的工作流程。
         我们需要：
         1. 创建节点（Node）- 每个节点是一个处理函数
         2. 定义边（Edge）- 节点之间的流转关系
         3. 设置入口点 - 图的起始节点
-        
+
         【图的拓扑结构】
         START -> perception -> reasoning -> action -> [条件判断]
                                                         |
@@ -111,54 +152,49 @@ class WebUIAgent:
                     └──> END (如果完成或超时)
                     └──> perception (如果继续)
         """
-        
+
         def perception_wrapper(state: AgentState) -> dict:
             return perception_node(state, self.page, self.context)
-        
+
         def reasoning_wrapper(state: AgentState) -> dict:
             llm = self.model_manager.get_current_llm()
             return reasoning_node(state, llm, self.context)
-        
+
         def action_wrapper(state: AgentState) -> dict:
             return action_node(state, self.page, self.context)
-        
+
         def should_continue_wrapper(state: AgentState) -> str:
             return should_continue(state, self.context)
-        
+
         graph = StateGraph(AgentState)
-        
+
         graph.add_node("perception", perception_wrapper)
         graph.add_node("reasoning", reasoning_wrapper)
         graph.add_node("action", action_wrapper)
-        
+
         graph.set_entry_point("perception")
-        
+
         graph.add_edge("perception", "reasoning")
         graph.add_edge("reasoning", "action")
         graph.add_conditional_edges(
-            "action",
-            should_continue_wrapper,
-            {
-                "perception": "perception",
-                "end": END
-            }
+            "action", should_continue_wrapper, {"perception": "perception", "end": END}
         )
-        
+
         return graph.compile()
-    
+
     def _init_browser(self, storage_state: dict = None):
         """
         初始化浏览器
-       
+
         【设计思路】
         支持两种浏览器模式：
-        
+
         1. 本地 Chrome 模式（推荐）：
            - 通过 CDP 连接到已运行的本地 Chrome
            - 直接使用已有的 context 和 page（非隐身模式）
            - 不注入反检测脚本（使用真实浏览器指纹）
            - 保留登录状态、cookies 等用户数据
-        
+
         2. Playwright Chromium 模式：
            - headless=False - 显示浏览器窗口，便于观察执行过程
            - slow_mo - 减慢操作速度，便于观察
@@ -172,58 +208,59 @@ class WebUIAgent:
 
         # 生成随机的浏览器指纹参数
         import random
+
         # 随机窗口大小（在常见分辨率范围内）
         window_width = random.choice([1920, 1680, 1600, 1440, 1366])
         window_height = random.choice([1080, 1050, 900, 768])
 
         browser_args = [
-            '--disable-blink-features=AutomationControlled',
-            f'--window-size={window_width},{window_height}',
-            '--window-position=0,0',
-            '--disable-extensions',
-            '--disable-default-apps',
-            '--disable-component-extensions-with-background-pages',
-            '--disable-background-networking',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-client-side-phishing-detection',
-            '--disable-popup-blocking',
-            '--disable-sync',
-            '--hide-scrollbars',
-            '--disable-notifications',
-            '--no-first-run',
-            '--no-sandbox',
-            '--disable-infobars',
-            '--disable-password-generation',
-            '--disable-password-manager',
-            '--disable-autofill-keyboard-accessory-view',
-            '--disable-save-password-bubble',
-            '--disable-webgl',
-            '--disable-3d-apis',
-            '--disable-experimental-extension-apis',
-            '--disable-webrtc-hw-encoding',
+            "--disable-blink-features=AutomationControlled",
+            f"--window-size={window_width},{window_height}",
+            "--window-position=0,0",
+            "--disable-extensions",
+            "--disable-default-apps",
+            "--disable-component-extensions-with-background-pages",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-client-side-phishing-detection",
+            "--disable-popup-blocking",
+            "--disable-sync",
+            "--hide-scrollbars",
+            "--disable-notifications",
+            "--no-first-run",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--disable-password-generation",
+            "--disable-password-manager",
+            "--disable-autofill-keyboard-accessory-view",
+            "--disable-save-password-bubble",
+            "--disable-webgl",
+            "--disable-3d-apis",
+            "--disable-experimental-extension-apis",
+            "--disable-webrtc-hw-encoding",
             # 禁用 WebRTC 完全
-            '--disable-webrtc',
+            "--disable-webrtc",
             # 禁用 WebGL2
-            '--disable-webgl2',
+            "--disable-webgl2",
             # 设置用户代理（关键）
-            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             # 设置语言
-            '--lang=zh-CN',
+            "--lang=zh-CN",
             # 禁用站点隔离（可能有助于某些检测）
-            '--disable-site-isolation-trials',
+            "--disable-site-isolation-trials",
             # 启用远程调试端口（用于 web_server 截图流）
-            '--remote-debugging-port=9222',
+            "--remote-debugging-port=9222",
             # 注意：Playwright 的 launch() 不支持 --user-data-dir 参数
             # 如需持久化用户数据，应使用 launch_persistent_context() 方法
         ]
-        
+
         # 添加代理（如果配置了）
         if PROXY_SERVER:
-            browser_args.append(f'--proxy-server={PROXY_SERVER}')
+            browser_args.append(f"--proxy-server={PROXY_SERVER}")
             print(f"🌐 使用代理: {PROXY_SERVER}")
-        
+
         # 注意：Playwright 的 browser_context 默认就是隔离的（类似隐身模式）
         # 如果需要持久化用户数据，应使用 launch_persistent_context 方法
         # 这里不需要额外的 --user-data-dir 或 --incognito 参数
@@ -233,19 +270,23 @@ class WebUIAgent:
         use_local_chrome = False
         try:
             # 先尝试连接已运行的 Chrome 远程调试端口
-            self.browser = self.playwright.chromium.connect_over_cdp("http://localhost:9222")
+            self.browser = self.playwright.chromium.connect_over_cdp(
+                "http://localhost:9222"
+            )
             print("✅ 已连接到本地 Chrome（远程调试模式）")
             use_local_chrome = True
         except Exception:
             # 如果没有本地 Chrome，使用 Playwright 的 Chromium
             self.browser = self.playwright.chromium.launch(
-                headless=False,
-                slow_mo=100,
-                args=browser_args
+                headless=False, slow_mo=100, args=browser_args
             )
-            print("⚠️ 使用 Playwright Chromium（建议启动本地 Chrome 以获得更好的反检测效果）")
+            print(
+                "⚠️ 使用 Playwright Chromium（建议启动本地 Chrome 以获得更好的反检测效果）"
+            )
             print("   启动本地 Chrome 命令：")
-            print(r'   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_dev_profile"')
+            print(
+                r'   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome_dev_profile"'
+            )
 
         # ==================== 本地 Chrome 模式 ====================
         # 直接使用已有的 context 和 page，不创建新的（避免隐身模式）
@@ -256,13 +297,15 @@ class WebUIAgent:
                 # 使用已有的 context（保留登录状态、cookies 等）
                 self.browser_context = contexts[0]
                 print("📌 使用本地 Chrome 已有的浏览器上下文（非隐身模式）")
-                
+
                 # 获取已有的页面
                 pages = self.browser_context.pages
                 if pages:
                     # 使用最后一个（最新）页面
                     self.page = pages[-1]
-                    print(f"📌 使用已有页面: {self.page.url if self.page.url else 'about:blank'}")
+                    print(
+                        f"📌 使用已有页面: {self.page.url if self.page.url else 'about:blank'}"
+                    )
                 else:
                     # 如果没有页面，创建一个新页面
                     self.page = self.browser_context.new_page()
@@ -272,45 +315,45 @@ class WebUIAgent:
                 self.browser_context = self.browser.new_context()
                 self.page = self.browser_context.new_page()
                 print("📌 创建新的浏览器上下文和页面")
-            
+
             # 本地 Chrome 不注入反检测脚本，因为它已经是真实浏览器
             print("🛡️ 本地 Chrome 模式：不注入反检测脚本（使用真实浏览器指纹）")
-        
+
         # ==================== Playwright Chromium 模式 ====================
         # 保持原有逻辑：创建新的 context 和 page，注入反检测脚本
         else:
             # 创建浏览器上下文，设置更真实的用户代理和视口
             # 使用真实的 Chrome User-Agent
-            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
             context_options = {
-                'viewport': {'width': 1920, 'height': 1080},
-                'user_agent': user_agent,
-                'locale': 'zh-CN',
-                'timezone_id': 'Asia/Shanghai',
-                'geolocation': {'latitude': 31.2304, 'longitude': 121.4737},  # 上海坐标
-                'permissions': ['geolocation'],
-                'color_scheme': 'light',
+                "viewport": {"width": 1920, "height": 1080},
+                "user_agent": user_agent,
+                "locale": "zh-CN",
+                "timezone_id": "Asia/Shanghai",
+                "geolocation": {"latitude": 31.2304, "longitude": 121.4737},  # 上海坐标
+                "permissions": ["geolocation"],
+                "color_scheme": "light",
                 # 添加额外的 HTTP 头来模拟真实浏览器
-                'extra_http_headers': {
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'max-age=0',
-                    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"Windows"',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1',
-                }
+                "extra_http_headers": {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Cache-Control": "max-age=0",
+                    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
             }
 
             if storage_state:
                 print("🔄 正在恢复浏览器会话状态...")
-                context_options['storage_state'] = storage_state
+                context_options["storage_state"] = storage_state
 
             self.browser_context = self.browser.new_context(**context_options)
 
@@ -664,11 +707,11 @@ class WebUIAgent:
             print("✅ 浏览器启动成功（已启用反检测模式）")
 
         self._prompt_credential_login()
-    
+
     def _prompt_credential_login(self):
         """
         在浏览器启动后提示用户登录凭证管理器
-        
+
         【设计思路】
         浏览器启动后立即提示用户登录凭证管理器，
         这样在执行任务时可以直接使用已保存的账号密码。
@@ -676,66 +719,73 @@ class WebUIAgent:
         """
         try:
             from credential_manager import CredentialManager
+
             HAS_CREDENTIAL_MANAGER = True
         except ImportError:
             HAS_CREDENTIAL_MANAGER = False
             return
-        
+
         if not HAS_CREDENTIAL_MANAGER:
             return
-        
-        print("\n" + "─"*60)
+
+        print("\n" + "─" * 60)
         print("🔐 凭证管理器")
-        print("─"*60)
-        
+        print("─" * 60)
+
         self.context.init_credential_manager()
         cred_status = self.context.get_credential_status()
-        
+
         if cred_status.get("is_setup_complete"):
             print("📌 检测到已保存的凭证库")
             print("   登录后可自动填充账号密码（按 Enter 跳过）")
-            
+
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
                 try:
                     import msvcrt
                     import sys
-                    
+
                     if not sys.stdin.isatty():
                         raise Exception("Not a TTY, use input() instead")
-                    
+
                     if attempt > 1:
-                        print(f"\n🔄 请重新输入主密码 (第 {attempt}/{max_attempts} 次): ", end='', flush=True)
+                        print(
+                            f"\n🔄 请重新输入主密码 (第 {attempt}/{max_attempts} 次): ",
+                            end="",
+                            flush=True,
+                        )
                     else:
-                        print("主密码: ", end='', flush=True)
+                        print("主密码: ", end="", flush=True)
                     password_chars = []
                     while True:
                         ch = msvcrt.getch()
-                        if ch == b'\r' or ch == b'\n':
+                        if ch == b"\r" or ch == b"\n":
                             print()
                             break
-                        elif ch == b'\x08' or ch == b'\x7f':
+                        elif ch == b"\x08" or ch == b"\x7f":
                             if password_chars:
                                 password_chars.pop()
-                                print('\b \b', end='', flush=True)
-                        elif ch == b'\x03':
+                                print("\b \b", end="", flush=True)
+                        elif ch == b"\x03":
                             print("\n⏭️ 已跳过登录")
                             return
                         else:
                             try:
-                                char = ch.decode('utf-8')
+                                char = ch.decode("utf-8")
                                 password_chars.append(char)
-                                print('*', end='', flush=True)
+                                print("*", end="", flush=True)
                             except:
                                 pass
-                    master_password = ''.join(password_chars)
+                    master_password = "".join(password_chars)
                 except Exception:
-                    master_password = input(f"主密码 (第 {attempt}/{max_attempts} 次): ")
-                
+                    master_password = input(
+                        f"主密码 (第 {attempt}/{max_attempts} 次): "
+                    )
+
                 if not master_password:
                     print("⏭️ 已跳过，稍后可使用 'cred_login' 命令登录")
                     return
-                
+
                 if self.context.login_credential_manager(master_password):
                     print("✅ 凭证管理器登录成功")
                     return
@@ -747,9 +797,9 @@ class WebUIAgent:
         else:
             print("📌 凭证管理器未初始化")
             print("   使用 'cred_login' 命令初始化并添加账号")
-        
-        print("─"*60 + "\n")
-    
+
+        print("─" * 60 + "\n")
+
     def _close_browser(self):
         """
         手动关闭浏览器
@@ -791,47 +841,47 @@ class WebUIAgent:
             self.playwright = None
 
         print("✅ 浏览器已关闭")
-    
+
     def _display_result_in_browser(self, state: AgentState):
         """
         在浏览器中展示任务结果摘要
-        
+
         【设计思路】
         任务完成后，在浏览器中打开一个新页面展示执行结果，
         方便用户查看任务详情和操作记录。
         """
         if not self.browser:
             return
-        
+
         result_page = self.browser.new_page()
-        
-        step_count = state['step_count']
-        is_done = state['is_done']
-        error_message = state.get('error_message', '')
-        history = state.get('history', [])
-        objective = state.get('objective', '未知任务')
-        termination_reason = state.get('termination_reason', '')
-        progress_ratio = state.get('progress_ratio', 0)
-        max_steps = state.get('max_steps', MAX_STEPS)
-        
+
+        step_count = state["step_count"]
+        is_done = state["is_done"]
+        error_message = state.get("error_message", "")
+        history = state.get("history", [])
+        objective = state.get("objective", "未知任务")
+        termination_reason = state.get("termination_reason", "")
+        progress_ratio = state.get("progress_ratio", 0)
+        max_steps = state.get("max_steps", MAX_STEPS)
+
         status_icon = "✅" if is_done else "⚠️"
         status_text = "已完成" if is_done else "未完成"
         status_color = "#28a745" if is_done else "#ffc107"
-        
+
         history_rows = ""
         for entry in history:
-            step = entry.get('step', '?')
-            action = entry.get('action_type', '?')
-            result = entry.get('result', '?')
-            thought = entry.get('thought', '')
+            step = entry.get("step", "?")
+            action = entry.get("action_type", "?")
+            result = entry.get("result", "?")
+            thought = entry.get("thought", "")
             history_rows += f"""
                 <tr>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{step}</td>
                     <td style="padding: 8px; border: 1px solid #ddd;"><code>{action}</code></td>
-                    <td style="padding: 8px; border: 1px solid #ddd;">{result[:100]}{'...' if len(result) > 100 else ''}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{result[:100]}{"..." if len(result) > 100 else ""}</td>
                 </tr>
             """
-        
+
         termination_info = ""
         if termination_reason:
             termination_info = f"""
@@ -839,7 +889,7 @@ class WebUIAgent:
                     <strong>🛑 终止原因：</strong>{termination_reason}
                 </div>
             """
-        
+
         html_content = f"""
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -1003,45 +1053,49 @@ class WebUIAgent:
         </body>
         </html>
         """
-        
+
         result_page.set_content(html_content)
         print("📊 任务结果已在浏览器中展示")
-    
+
     def _wait_for_user_close(self):
         """
         等待用户手动确认关闭浏览器
-        
+
         【设计思路】
         任务完成后，保持浏览器打开，等待用户在终端按 Enter 键后关闭。
         这样用户有足够时间查看浏览器中的信息内容。
         """
-        print("\n" + "═"*60)
+        print("\n" + "═" * 60)
         print("💡 任务已完成，浏览器保持打开状态")
         print("   您可以在浏览器中查看任务执行结果")
         print("   按 Enter 键关闭浏览器并退出程序...")
-        print("═"*60)
-        
+        print("═" * 60)
+
         try:
             input()
         except (EOFError, KeyboardInterrupt):
             pass
-        
+
         self._close_browser()
-    
-    def run(self, objective: str, start_url: str = None, 
-            keep_browser_open: bool = True,
-            max_steps: int = None,
-            resume_from_checkpoint: str = None) -> AgentState:
+
+    def run(
+        self,
+        objective: str,
+        start_url: str = None,
+        keep_browser_open: bool = True,
+        max_steps: int = None,
+        resume_from_checkpoint: str = None,
+    ) -> AgentState:
         """
         运行 Agent 执行任务
-        
+
         【参数】
         objective: str - 用户目标描述
         start_url: str - 起始页面 URL（可选）
         keep_browser_open: bool - 任务完成后是否保持浏览器打开（默认 True）
         max_steps: int - 最大步骤限制（可选，默认使用配置值）
         resume_from_checkpoint: str - 从检查点恢复的ID（可选）
-        
+
         【工作流程】
         1. 初始化浏览器
         2. 如果有起始 URL，导航到该页面
@@ -1050,14 +1104,14 @@ class WebUIAgent:
         5. 输出结果
         6. 在浏览器中展示结果（如果 keep_browser_open 为 True）
         7. 等待用户确认后关闭浏览器（如果 keep_browser_open 为 True）
-        
+
         【返回值】
         AgentState: 最终状态
         """
         checkpoint_data = None
         storage_state = None
         actual_objective = objective
-        
+
         if resume_from_checkpoint:
             checkpoint_data = self.context.checkpoint_manager.load_checkpoint(
                 resume_from_checkpoint
@@ -1067,58 +1121,81 @@ class WebUIAgent:
                 actual_objective = checkpoint_data.state.get("objective", objective)
                 if storage_state:
                     print("📦 发现保存的浏览器会话状态")
-        
-        print("\n" + "═"*60)
+
+        print("\n" + "═" * 60)
         print("🎯 开始执行任务")
-        print("═"*60)
+        print("═" * 60)
         print(f"📋 目标: {actual_objective}")
         if start_url:
             print(f"🌐 起始页面: {start_url}")
-        print("═"*60 + "\n")
-        
+        print("═" * 60 + "\n")
+
         self._init_browser(storage_state=storage_state)
-        
+
         try:
             if checkpoint_data:
                 initial_state = checkpoint_data.state
-                
-                initial_state.setdefault("task_complexity", DEFAULT_TASK_COMPLEXITY.value)
+
+                initial_state.setdefault(
+                    "task_complexity", DEFAULT_TASK_COMPLEXITY.value
+                )
                 initial_state.setdefault("progress_level", DEFAULT_PROGRESS_LEVEL)
-                initial_state.setdefault("adjusted_stagnation_threshold", PROGRESS_STAGNATION_DEFAULT)
-                initial_state.setdefault("intervention_paused", DEFAULT_INTERVENTION_PAUSED)
+                initial_state.setdefault(
+                    "adjusted_stagnation_threshold", PROGRESS_STAGNATION_DEFAULT
+                )
+                initial_state.setdefault(
+                    "intervention_paused", DEFAULT_INTERVENTION_PAUSED
+                )
                 initial_state.setdefault("fast_mode", DEFAULT_FAST_MODE)
-                
+
                 self.context.step_manager = self.context.step_manager.from_dict(
                     checkpoint_data.step_manager
                 )
-                self.context.completion_evaluator = self.context.completion_evaluator.from_dict(
-                    checkpoint_data.completion_evaluator
+                self.context.completion_evaluator = (
+                    self.context.completion_evaluator.from_dict(
+                        checkpoint_data.completion_evaluator
+                    )
                 )
-                self.context.termination_manager = self.context.termination_manager.from_dict(
-                    checkpoint_data.termination_manager
+                self.context.termination_manager = (
+                    self.context.termination_manager.from_dict(
+                        checkpoint_data.termination_manager
+                    )
                 )
-                
-                if max_steps and max_steps > self.context.step_manager.current_max_steps:
+
+                if (
+                    max_steps
+                    and max_steps > self.context.step_manager.current_max_steps
+                ):
                     self.context.step_manager.current_max_steps = max_steps
                     print(f"📊 使用命令行指定的最大步骤: {max_steps}")
                 else:
                     saved_step_count = initial_state.get("step_count", 0)
-                    remaining_steps = self.context.step_manager.current_max_steps - saved_step_count
+                    remaining_steps = (
+                        self.context.step_manager.current_max_steps - saved_step_count
+                    )
                     if remaining_steps < MIN_REMAINING_STEPS_THRESHOLD:
                         new_max = saved_step_count + DEFAULT_STEPS_EXTENSION
                         self.context.step_manager.adjust_max_steps(
                             reason="恢复检查点时自动扩展（剩余步骤不足）",
                             target_steps=new_max,
-                            current_step=saved_step_count
+                            current_step=saved_step_count,
                         )
-                
+
                 initial_state["max_steps"] = self.context.step_manager.current_max_steps
-                
+
                 saved_url = initial_state.get("current_url", "")
-                if saved_url and saved_url != "about:blank" and not saved_url.startswith("data:"):
+                if (
+                    saved_url
+                    and saved_url != "about:blank"
+                    and not saved_url.startswith("data:")
+                ):
                     print(f"🌐 导航到检查点页面: {saved_url}")
                     try:
-                        self.page.goto(saved_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                        self.page.goto(
+                            saved_url,
+                            timeout=PAGE_LOAD_TIMEOUT,
+                            wait_until="domcontentloaded",
+                        )
                         # 优化：不再等待 networkidle，直接等待 load 状态
                         try:
                             self.page.wait_for_load_state("load", timeout=5000)
@@ -1127,9 +1204,11 @@ class WebUIAgent:
                         initial_state["current_url"] = self.page.url
                     except Exception as e:
                         print(f"⚠️ 导航到检查点页面失败: {e}")
-                
+
                 print(f"✅ 已从检查点恢复: {resume_from_checkpoint}")
-                print(f"📊 恢复后最大步骤: {self.context.step_manager.current_max_steps}")
+                print(
+                    f"📊 恢复后最大步骤: {self.context.step_manager.current_max_steps}"
+                )
                 print(f"📝 已执行步骤: {initial_state.get('step_count', 0)}")
             elif resume_from_checkpoint:
                 print("⚠️ 检查点加载失败，使用初始状态")
@@ -1138,56 +1217,66 @@ class WebUIAgent:
                 initial_state = create_initial_state(
                     objective=objective,
                     current_url="",
-                    max_steps=self.context.step_manager.current_max_steps
+                    max_steps=self.context.step_manager.current_max_steps,
                 )
             else:
                 if max_steps:
                     self.context.step_manager.current_max_steps = max_steps
-                    
+
                 if start_url:
                     print(f"🌐 导航到起始页面: {start_url}")
-                    self.page.goto(start_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    self.page.goto(
+                        start_url,
+                        timeout=PAGE_LOAD_TIMEOUT,
+                        wait_until="domcontentloaded",
+                    )
                     # 优化：不再等待 networkidle，直接等待 load 状态
                     try:
                         self.page.wait_for_load_state("load", timeout=5000)
                     except Exception:
                         pass
-                
+
                 initial_state = create_initial_state(
                     objective=objective,
                     current_url=self.page.url,
-                    max_steps=self.context.step_manager.current_max_steps
+                    max_steps=self.context.step_manager.current_max_steps,
                 )
-            
+
             self.context.initialize(objective, start_url or "")
-            
+
             # 在任务开始时立即评估并输出复杂度
-            initial_complexity = self.context.completion_evaluator.evaluate_task_complexity(objective)
+            initial_complexity = (
+                self.context.completion_evaluator.evaluate_task_complexity(objective)
+            )
             self.context.completion_evaluator.task_complexity = initial_complexity
             self.context.termination_manager.set_task_complexity(initial_complexity)
-            print(f"📊 任务复杂度更新: {initial_complexity.value}, 停滞阈值: {self.context.termination_manager.adjusted_stagnation_threshold}")
-            
+            print(
+                f"📊 任务复杂度更新: {initial_complexity.value}, 停滞阈值: {self.context.termination_manager.adjusted_stagnation_threshold}"
+            )
+
             # 更新初始状态的复杂度
             initial_state["task_complexity"] = initial_complexity.value
-            initial_state["adjusted_stagnation_threshold"] = self.context.termination_manager.adjusted_stagnation_threshold
-            
+            initial_state["adjusted_stagnation_threshold"] = (
+                self.context.termination_manager.adjusted_stagnation_threshold
+            )
+
             final_state = self.graph.invoke(initial_state)
-            
+
             try:
                 self._print_summary(final_state)
             except Exception as e:
                 print(f"⚠️ 打印摘要时出错: {e}")
-            
+
             try:
                 self.context.logger.log_session_end(
-                    success=final_state.get('is_done', False),
-                    step_count=final_state.get('step_count', 0),
+                    success=final_state.get("is_done", False),
+                    step_count=final_state.get("step_count", 0),
                     duration=self.context.termination_manager.get_elapsed_time(),
-                    reason=final_state.get('termination_reason', '')
+                    reason=final_state.get("termination_reason", ""),
                 )
             except Exception as e:
                 print(f"⚠️ 记录会话结束日志时出错: {e}")
-            
+
             try:
                 if keep_browser_open:
                     self._display_result_in_browser(final_state)
@@ -1197,14 +1286,14 @@ class WebUIAgent:
             except Exception as e:
                 print(f"⚠️ 浏览器操作时出错: {e}")
                 self._close_browser()
-            
+
             try:
                 self.context.cleanup()
             except Exception as e:
                 print(f"⚠️ 清理资源时出错: {e}")
-            
+
             return final_state
-            
+
         except Exception as e:
             print(f"\n❌ 执行过程中发生错误: {e}")
             self.context.logger.log_error(str(e), 0)
@@ -1218,42 +1307,42 @@ class WebUIAgent:
             self._close_browser()
             self.context.cleanup()
             raise
-    
+
     def _print_summary(self, state: AgentState):
         """
         打印执行结果汇总
-        
+
         【参数】
         state: AgentState - 最终状态
         """
         try:
-            print("\n" + "═"*60)
+            print("\n" + "═" * 60)
             print("📊 执行结果汇总")
-            print("═"*60)
+            print("═" * 60)
             print(f"✅ 总步数: {state['step_count']}")
             print(f"📊 最大步骤: {state.get('max_steps', MAX_STEPS)}")
             print(f"📈 完成进度: {state.get('progress_ratio', 0):.1%}")
             print(f"🎯 任务状态: {'已完成' if state['is_done'] else '未完成'}")
-            
+
             if state.get("termination_reason"):
                 print(f"🛑 终止原因: {state['termination_reason']}")
-            
+
             if state.get("error_message"):
                 print(f"⚠️ 最后错误: {state['error_message']}")
-            
+
             if state.get("final_summary"):
-                print("\n" + "═"*60)
+                print("\n" + "═" * 60)
                 print("📋 任务结果总结")
-                print("═"*60)
+                print("═" * 60)
                 print(state["final_summary"])
-                print("═"*60)
-            
+                print("═" * 60)
+
             if state.get("is_browsing_task") and state.get("collected_products"):
                 products = state.get("collected_products", [])
                 print(f"\n📦 共收集 {len(products)} 款商品信息")
-            
+
             print(f"💾 检查点: {state.get('saved_checkpoint_id', '无')}")
-            
+
             print("\n📜 执行历史:")
             for entry in state["history"]:
                 step = entry.get("step", "?")
@@ -1262,23 +1351,26 @@ class WebUIAgent:
                 # 脱敏执行结果中的敏感信息
                 result = sanitize_log_message(result)
                 print(f"   步骤{step}: {action} -> {result}")
-            
+
             print("\n" + self.context.step_manager.get_adjustment_summary())
             print("\n" + self.context.completion_evaluator.get_completion_summary())
             print("\n" + self.context.logger.get_step_summary())
-            
+
             from performance_monitor import get_performance_monitor
+
             perf_monitor = get_performance_monitor()
             perf_monitor.print_summary()
             perf_report_path = perf_monitor.save_report()
             print(f"\n📄 性能报告已保存: {perf_report_path}")
         except Exception as e:
             print(f"⚠️ 生成执行摘要时出错: {e}")
-    
+
     def list_checkpoints(self, limit: int = 5):
         """列出可用的检查点"""
         self.context.checkpoint_manager.display_checkpoints(limit)
-    
+
     def cleanup_old_checkpoints(self, max_age_hours: int = 24, keep_count: int = 5):
         """清理过期检查点"""
-        self.context.checkpoint_manager.cleanup_old_checkpoints(max_age_hours, keep_count)
+        self.context.checkpoint_manager.cleanup_old_checkpoints(
+            max_age_hours, keep_count
+        )

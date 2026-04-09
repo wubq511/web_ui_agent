@@ -68,7 +68,7 @@ interface ControlState {
  */
 const initialState: ControlState = {
   status: 'idle',
-  selectedModel: 'gemini-3-flash-preview',
+  selectedModel: '',
   objective: '',
   isConnected: false,
   isPaused: false,
